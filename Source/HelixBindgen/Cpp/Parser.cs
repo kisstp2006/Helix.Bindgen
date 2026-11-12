@@ -9,6 +9,8 @@ namespace Helix.Bindgen.Cpp;
 /// </summary>
 public sealed class Parser
 {
+    static readonly HashSet<string> Tags = new() { "HX_CLASS", "HX_STRUCT", "HX_INTERFACE", "HX_ENUM", "HX_FIELD", "HX_PROPERTY", "HX_FUNCTION", "HX_EVENT" };
+
     readonly List<Token> _t;
     readonly string _file;
     readonly ModuleModel _module;
@@ -104,6 +106,17 @@ public sealed class Parser
             {
                 isPublic = tok.Is("public");
                 _pos += 2;
+                continue;
+            }
+            if (tok.Kind == TokenKind.Identifier && tok.Text.StartsWith("HX_", StringComparison.Ordinal) && Peek(1).Is("(") && !Tags.Contains(tok.Text))
+            {
+                // Another macro of the HX_ family (HX_ENGINE_CLASS, ...): its arguments skipped, no semicolon after it.
+                _pos += 2;
+                for (int depth = 1; depth > 0 && Peek().Kind != TokenKind.End;)
+                {
+                    Token t = Next();
+                    depth += t.Is("(") ? 1 : t.Is(")") ? -1 : 0;
+                }
                 continue;
             }
             if (tok.Kind == TokenKind.Identifier && tok.Text.StartsWith("HX_", StringComparison.Ordinal) && Peek(1).Is("("))
