@@ -62,6 +62,19 @@ private:
   copies hold their own; no pointers), with its constructors (`New`), methods, statics, and its properties and fields
   as members read and written as in C# (`counter.Scale = 2.5f; f32 s = counter.Scale;`). Failed calls are logged and
   answer the default value.
+- Objects: one C# wrapper per native object, its GC handle in the root class's wrapper slot (weak for plain
+  wrappers, strong for objects of C# classes deriving from C++ ones, so their state lives with the native object);
+  the root class has the reference's equality: a destroyed object is `== null` and false, `is null` sees only the
+  C# reference; members of destroyed objects throw (through `Native.MakeException`).
+- C# classes deriving from C++ classes (a class with a tagged C++ constructor): its tagged virtual functions are
+  C# virtual methods; the object is made as a generated C++ subclass whose overrides call the C# overrides the C#
+  class has (found once per class); base calls reach the C++ implementation; pure virtual functions are overridden
+  in C# (`new` of the class itself throws).
+- Interfaces: a C++ interface (HX_INTERFACE) taken from C# is a native object that implements it or any C# object
+  that does, through a generated adapter; a C# interface given to `PROXIES` is an abstract C++ class, and a C++
+  object of it handed to C# arrives as a forwarding object, borrowed for the call.
+- Events and delegates: C++ events reach C# delegates; C# events of proxied classes take C++ handlers
+  (`counter.Changed.Add({function, user})`, `Remove(token)`), and Action / Func arguments take C++ functions.
 - Registration: every type of the module in the scripting core with fields by offset or by accessor, methods,
   properties and events with invokers on Variants, so reflection, serialization and tools reach both languages alike.
 
