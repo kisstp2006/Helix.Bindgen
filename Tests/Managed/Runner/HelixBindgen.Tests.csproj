@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- The test program: loads the native sample library, calls it through the bindings of the scripts assembly, and
+       hands the native side the exports of its C++ proxies. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net11.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <RootNamespace>Helix.Bindgen.Tests</RootNamespace>
+    <AssemblyName>HelixBindgen.Tests</AssemblyName>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="$(HelixExportsFile)" />
+    <Reference Include="HelixBindgen.Scripts">
+      <HintPath>$(HelixScriptsAssembly)</HintPath>
+    </Reference>
+  </ItemGroup>
+</Project>
