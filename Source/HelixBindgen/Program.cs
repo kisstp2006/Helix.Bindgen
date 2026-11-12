@@ -8,7 +8,7 @@ namespace Helix.Bindgen;
 
 /// <summary>
 /// Native to C#:  HelixBindgen --module Name --namespace CsNamespace [--kind Engine|NativeGame] --header a.h ...
-///                  [--reference b.h ...] [--include-root dir ...] --out-cpp file.cpp --out-cs file.cs [--out-api file.h]
+///                  [--reference b.h ...] [--reference-namespace Ns] [--include-root dir ...] --out-cpp file.cpp --out-cs file.cs [--out-api file.h]
 /// C# to native:  HelixBindgen --module AssemblyName --assembly file.dll --proxy Namespace.Type ... [--reference b.h ...]
 ///                  [--include-root dir ...] --out-h file.h --out-cpp file.cpp --out-cs file.cs
 /// Headers are the module's own (generated); references are other modules' headers (their types known, not generated).
@@ -37,7 +37,7 @@ public static class Program
 
     static int Run(string[] args)
     {
-        string? module = null, ns = null, outCpp = null, outCs = null, outH = null, outApi = null, assembly = null;
+        string? module = null, ns = null, referenceNs = null, outCpp = null, outCs = null, outH = null, outApi = null, assembly = null;
         var proxies = new List<string>();
         string kind = "NativeGame";
         var headers = new List<string>();
@@ -53,6 +53,7 @@ public static class Program
                 case "--kind": kind = Value(); break;
                 case "--header": headers.Add(Value()); break;
                 case "--reference": references.Add(Value()); break;
+                case "--reference-namespace": referenceNs = Value(); break;
                 case "--include-root": roots.Add(Path.GetFullPath(Value())); break;
                 case "--out-cpp": outCpp = Value(); break;
                 case "--out-cs": outCs = Value(); break;
@@ -82,7 +83,7 @@ public static class Program
         foreach (string r in references)
         {
             int before = model.Types.Count;
-            Parser.ParseFile(r, model, ns ?? "");
+            Parser.ParseFile(r, model, referenceNs ?? ns ?? "");
             foreach (TypeModel t in model.Types.Skip(before))
                 t.External = true;
         }

@@ -31,6 +31,8 @@ public sealed class CppGenerator
     // ------------------------------------------------------------------------------------------- C++ spellings
 
     static string Q(TypeModel t) => "::" + t.CppName;
+    // The value handle of a class in the C++ script API.
+    static string Handle(TypeModel t) => "::" + t.CsFullName.Replace(".", "::");
 
     string PrimitiveName(string name) => HelixAliases.Contains(name) ? "::helix::" + name
                                          : name.StartsWith("std::", StringComparison.Ordinal) ? "::" + name
@@ -40,6 +42,11 @@ public sealed class CppGenerator
     /// <summary>A declared type spelled with qualified names (for the callbacks of events).</summary>
     string Spell(TypeRef t, Location where, string what)
     {
+        string suffix = new string('*', t.Pointers) + (t.Reference ? "&" : "");
+        if (_b.ValueHandle(t) is TypeModel handle)
+            return (t.Const ? "const " : "") + Handle(handle) + suffix;
+        if (_b.HoldsValueHandle(t))
+            return (t.Const ? "const " : "") + "::helix::Array<" + Handle(_b.ValueHandle(t.Arguments[0])!) + ">" + suffix;
         Mapping m = _b.Map.Map(t, where, what);
         string name = m.Kind switch
         {
@@ -88,6 +95,9 @@ public sealed class CppGenerator
         _c.Line("#include <Helix/Scripting/Bindings/Marshal.h>");
         _c.Line("#include <Helix/Scripting/Types/TypeBuilder.h>");
         _c.Line("#include <Helix/Scripting/Scripts/NativeScript.h>");
+        CollectSerialization();
+        if (_transfers.Count > 0)
+            _c.Line("#include <Helix/Serialization/Transfer/Dynamic.h>");
         _c.Line();
         foreach (string inc in includes)
             _c.Line($"#include {inc}");
@@ -103,6 +113,17 @@ public sealed class CppGenerator
         _c.Line("using namespace ::helix::scripting;");
         _c.Line();
         WritePrivateAccess();
+        if (_transfers.Count > 0)
+        {
+            _c.Close("}");
+            _c.Line();
+            WriteSerializationTraits();
+            _c.Open("namespace");
+            _c.Line("using namespace ::helix;");
+            _c.Line("using namespace ::helix::scripting;");
+            _c.Line();
+            WriteScriptTransfers();
+        }
         WriteBridge();
         foreach (Thunk th in _b.Thunks)
             WriteThunk(th);
@@ -206,8 +227,124 @@ public sealed class CppGenerator
             _c.Line($"c.clone = [](void* m, const void* o) -> void* {{ return static_cast<{root}*>(new (m) {q}(*static_cast<const {q}*>(static_cast<const {root}*>(o)))); }};");
             _c.Line($"c.methods = Span<const NativeScriptMethod>(methods, {methods.Count}u);");
             _c.Line($"c.executionOrder = {(int.TryParse(t.Tag.Get("Order"), out int order) ? order : 0)};");
+            if (_transfers.Contains(t))
+                _c.Line($"c.transfer = &HxTransfer_{t.Ident};");
             _c.Line("RegisterNativeScriptClass(c);");
             _c.Close();
+        }
+    }
+
+    // ------------------------------------------------------------------------------------------- serialization
+
+    // Script classes with serialized fields (theirs or their own module's script bases'), the module's HX_STRUCTs those
+    // fields hold (by value, in arrays, inside each other), and the C++ types of their object references.
+    readonly List<TypeModel> _transfers = new();
+    readonly List<TypeModel> _serializedStructs = new();
+    readonly Dictionary<string, (TypeModel Bound, bool IsHandle)> _references = new();
+
+    // The script class and its bases of this module below the script base, the base first.
+    List<TypeModel> OwnScriptChain(TypeModel t) =>
+        _b.BaseChain(t).TakeWhile(c => !c.Tag.Has("ScriptBase") && !c.External).Reverse().ToList();
+
+    void CollectSerialization()
+    {
+        foreach (TypeModel t in _b.Ordered().Where(_b.IsScriptClass))
+        {
+            foreach (FieldModel f in t.Fields.Where(Binding.IsSerialized))
+                CollectFieldType(f.Type, f.Where, $"{t.Name}.{f.Name}");
+            if (OwnScriptChain(t).Any(c => c.Fields.Any(Binding.IsSerialized)))
+                _transfers.Add(t);
+        }
+    }
+
+    void CollectFieldType(TypeRef type, Location where, string what)
+    {
+        if (_b.ValueHandle(type) is TypeModel handle)
+        {
+            _references.TryAdd(Handle(handle), (handle, true));
+            return;
+        }
+        string last = type.Name.Split("::")[^1];
+        if (last == "Array" && type.Arguments.Count == 1)
+        {
+            CollectFieldType(type.Arguments[0], where, what);
+            return;
+        }
+        Mapping m = _b.Map.Map(type, where, what);
+        switch (m.Kind)
+        {
+            case MapKind.Object when type.Pointers == 1 && !type.Reference:
+                _references.TryAdd(Q(m.Bound!) + "*", (m.Bound!, false));
+                break;
+            case MapKind.Struct when type.Pointers == 0 && !type.Reference:
+                if (!m.Bound!.External && !_serializedStructs.Contains(m.Bound))
+                {
+                    _serializedStructs.Add(m.Bound);
+                    foreach (FieldModel f in m.Bound.Fields.Where(Binding.IsSerialized))
+                        CollectFieldType(f.Type, f.Where, $"{m.Bound.Name}.{f.Name}");
+                }
+                break;
+            case MapKind.Primitive or MapKind.Bool or MapKind.Enum:
+                break;
+            case MapKind.String when !type.Name.EndsWith("StringView", StringComparison.Ordinal):
+                break;
+            default:
+                throw new BindgenException(where, $"{what}: a {type.Spelling()} field is not serialized (mark it NonSerialized)");
+        }
+    }
+
+    // The object references (EntityId values, checked against the field's type when read) and the structs' fields.
+    void WriteSerializationTraits()
+    {
+        _c.Open("namespace helix::serialization");
+        foreach ((string spelling, (TypeModel bound, bool isHandle)) in _references)
+        {
+            string root = Q(_b.RootOf(bound));
+            string type = isHandle ? $"{spelling}::HxType()" : $"::helix::scripting::TypeOf<{Q(bound)}>()";
+            _c.Line("template <>");
+            _c.Open($"struct ObjectReferenceTraits<{spelling}>");
+            _c.Line($"using T = {spelling};");
+            _c.Line(isHandle
+                ? "static ::helix::u64 Id(const T& o) { return o.HxId(); }"
+                : $"static ::helix::u64 Id(const T& o) {{ return o ? ::helix::scripting::ObjectHandles<{root}>::ToId(o) : 0; }}");
+            _c.Open("static void Set(T& o, ::helix::u64 id)");
+            _c.Line($"{root}* r = id ? ::helix::scripting::ObjectHandles<{root}>::FromId(id) : nullptr;");
+            _c.Line($"bool fits = r && ::helix::scripting::IsAssignableFrom({type}, ::helix::scripting::ObjectHandles<{root}>::TypeOf(r));");
+            _c.Line(isHandle ? "o = T::HxFromId(fits ? id : 0);" : $"o = fits ? static_cast<{Q(bound)}*>(r) : nullptr;");
+            _c.Close();
+            _c.Close("};");
+        }
+        foreach (TypeModel s in _serializedStructs)
+        {
+            _c.Line("template <>");
+            _c.Open($"struct TransferTraits<{Q(s)}>");
+            _c.Line($"static constexpr ::helix::StringView kTypeName = \"{s.Name}\";");
+            _c.Line("template <class V>");
+            _c.Open($"static void Transfer(V& v, {Q(s)}& value)");
+            foreach (FieldModel f in s.Fields.Where(Binding.IsSerialized))
+                _c.Line($"v.Field(\"{f.CsName}\", {Access(s, f, "(&value)")});");
+            _c.Close();
+            _c.Close("};");
+        }
+        _c.Close("}");
+        _c.Line();
+    }
+
+    // Each script class's serialized fields through the dynamic visitor: its module's script bases' first.
+    void WriteScriptTransfers()
+    {
+        foreach (TypeModel t in _transfers)
+        {
+            string q = Q(t);
+            _c.Open($"void HxTransfer_{t.Ident}(void* instance, void* visitor)");
+            _c.Line($"{q}* self = static_cast<{q}*>(static_cast<{Q(_b.RootOf(t))}*>(instance));");
+            _c.Open("::helix::serialization::VisitDynamic(*static_cast<::helix::serialization::DynamicVisitor*>(visitor), [self](auto& f)");
+            foreach (TypeModel c in OwnScriptChain(t))
+                foreach (FieldModel f in c.Fields.Where(Binding.IsSerialized))
+                    _c.Line($"f.Field(\"{f.CsName}\", {Access(c, f, "self")});");
+            _c.Close("});");
+            _c.Close();
+            _c.Line();
         }
     }
 
@@ -1063,6 +1200,8 @@ public sealed class CppGenerator
 
     void WriteField(TypeModel t, FieldModel f)
     {
+        if (_b.SerializedOnly(f.Type))
+            return;
         Mapping m = _b.Map.Map(f.Type, f.Where, $"{t.Name}.{f.Name}");
         bool readOnly = f.Type.Const || f.Tag.Has("ReadOnly");
         bool serialized = !f.Static && !readOnly && !f.Tag.Has("NonSerialized");

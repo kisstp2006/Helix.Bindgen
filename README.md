@@ -92,6 +92,13 @@ private:
 - Scripts: a class deriving from a class tagged `ScriptBase` (the engine's GameBehaviour) is a script class: its
   message methods (public or not, no virtual needed) and its methods without arguments or with one bool are
   registered as a `NativeScriptClass` with function pointers; the tag argument `Order = <n>` is its DefaultExecutionOrder.
+- Script fields: each script class gets a transfer function over Helix.Serialization's `DynamicVisitor` with its
+  serialized `HX_FIELD` members (its module's script bases' first): public ones and private ones with
+  `SerializeField`, not static, const, `ReadOnly` or `NonSerialized`; numbers, bools, enums, `String`, `Array<T>`, the
+  module's `HX_STRUCT`s (their `TransferTraits` are generated; a member `Transfer` wins), types with `TransferTraits`
+  of the headers the module includes, and object references: pointers to objects of root classes and value handles
+  of the C++ script API (`HelixEngine::GameObject other;`), checked against the field's type when read. Fields C#
+  does not reach through the bindings (value handles, arrays of them and of strings) are serialized and left out of C#.
 
 Release, Ryzen 7 3750H, the sample module (its id lookup is a list search):
 
@@ -106,6 +113,9 @@ Release, Ryzen 7 3750H, the sample module (its id lookup is a list search):
 ```cmake
 include(External/Helix.Bindgen/CMake/HelixBindgen.cmake)
 helix_bindgen(my_module MODULE MyGame NAMESPACE MyGame HEADERS Source/Player.h INCLUDE_ROOTS Source CS_OUTPUT my_cs)
+# A game module: the engine's headers as references, their types in the engine's C# namespace.
+helix_bindgen(my_game MODULE MyGame KIND NativeGame HEADERS Source/Scripts.h REFERENCES ${engine_headers}
+              REFERENCE_NAMESPACE HelixEngine)
 helix_bindgen(my_module MODULE MyGame.Scripts ASSEMBLY ${scripts_dll} PROXIES MyGame.Inventory REFERENCES Source/Player.h
               CS_OUTPUT my_exports)
 ```

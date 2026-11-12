@@ -109,6 +109,34 @@ public sealed class Binding
     /// <summary>Where C# declares a virtual function first: the overridable of the method's own class.</summary>
     public bool IsFirstDeclaration(TypeModel owner, MethodModel m) => ChainVirtuals(owner).Any(o => o.First == m);
 
+    /// <summary>A value handle of the C++ script API: a bound object class by value, spelled with its C# namespace
+    /// (HelixEngine::GameObject). Fields of script classes hold them; they are serialized, not bound to C#.</summary>
+    public TypeModel? ValueHandle(TypeRef type)
+    {
+        if (type.Pointers != 0 || type.Reference || type.Arguments.Count > 0)
+            return null;
+        string name = type.Name.StartsWith("::", StringComparison.Ordinal) ? type.Name[2..] : type.Name;
+        TypeModel? t = Map.Find(name);
+        if (t == null || t.Kind != TypeKind.Class || !IsObjectClass(t))
+            return null;
+        return name == t.CsFullName.Replace(".", "::") ? t : null;
+    }
+
+    /// <summary>A value handle or an Array of them.</summary>
+    public bool HoldsValueHandle(TypeRef type) =>
+        ValueHandle(type) != null || (type.Name.Split("::")[^1] == "Array" && type.Arguments.Count == 1 && ValueHandle(type.Arguments[0]) != null);
+
+    /// <summary>A field type files hold that C# does not reach through the bindings: value handles, arrays of them and
+    /// of strings.</summary>
+    public bool SerializedOnly(TypeRef type) =>
+        HoldsValueHandle(type) ||
+        (type.Name.Split("::")[^1] == "Array" && type.Arguments.Count == 1 && type.Arguments[0].Name.Split("::")[^1] == "String" && type.Arguments[0].Pointers == 0);
+
+    /// <summary>A field files hold: not static, const or ReadOnly, not NonSerialized; a private one (C++ private, or
+    /// private in C#) with SerializeField.</summary>
+    public static bool IsSerialized(FieldModel f) =>
+        !f.Static && !f.Type.Const && !f.Tag.Has("ReadOnly") && !f.Tag.Has("NonSerialized") && (!f.Tag.Has("Private") || f.Tag.Has("SerializeField"));
+
     /// <summary>A class of the module deriving from a script base class (HX_CLASS(ScriptBase)), made by its engine.</summary>
     public bool IsScriptClass(TypeModel t) =>
         !t.External && t.Kind == TypeKind.Class && IsObjectClass(t) && !t.Tag.Has("ScriptBase") && !t.Tag.Has("Abstract") &&
@@ -237,7 +265,7 @@ public sealed class Binding
             if (t.Kind == TypeKind.Interface)
                 continue;
             // Private fields (SerializeField) are serialized, not seen by C#; Hidden members are not in C#.
-            foreach (FieldModel f in t.Fields.Where(f => !f.Tag.Has("Private") && !f.Tag.Has("Hidden")))
+            foreach (FieldModel f in t.Fields.Where(f => !f.Tag.Has("Private") && !f.Tag.Has("Hidden") && !SerializedOnly(f.Type)))
             {
                 Mapping m = Map.Map(f.Type, f.Where, $"{t.Name}.{f.Name}");
                 Thunks.Add(new Thunk { Kind = ThunkKind.FieldGet, Owner = t, Field = f, Type = m, Name = Name("get_" + f.Name), Static = f.Static });
