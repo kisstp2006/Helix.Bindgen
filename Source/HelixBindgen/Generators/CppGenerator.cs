@@ -293,10 +293,10 @@ public sealed class CppGenerator
         _c.Line("void* const* gHxManaged = nullptr;");
         _c.Line();
         _c.Line("template <class F>");
-        _c.Line("F HxManagedFn(u32 index) { return std::bit_cast<F>(gHxManaged[index]); }");
+        _c.Line("[[maybe_unused]] F HxManagedFn(u32 index) { return std::bit_cast<F>(gHxManaged[index]); }");
         _c.Line();
         _c.Line("template <class T>");
-        _c.Line("T HxDefault() { return T(); }");
+        _c.Line("[[maybe_unused]] T HxDefault() { return T(); }");
         _c.Line();
         _c.Line("// A type of the module: the one it has (declared by the module's own registry), else a new one.");
         _c.Open("TypeId HxDeclare(ModuleId module, StringView nameSpace, StringView name, TypeKind kind, TypeId base, u32 flags)");

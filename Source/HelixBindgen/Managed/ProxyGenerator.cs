@@ -275,11 +275,11 @@ public sealed class ProxyGenerator
         c.Line("void* const* gTable = nullptr;");
         c.Line();
         c.Line("template <class F>");
-        c.Line("F Fn(::helix::u32 index) { return std::bit_cast<F>(gTable[index]); }");
+        c.Line("[[maybe_unused]] F Fn(::helix::u32 index) { return std::bit_cast<F>(gTable[index]); }");
         c.Line();
         c.Line("// What a failed call answers.");
         c.Line("template <class T>");
-        c.Line("T Default() { return T(); }");
+        c.Line("[[maybe_unused]] T Default() { return T(); }");
         c.Line();
         c.Open("bool Ready(const char* what)");
         c.Line("if (gTable)");
