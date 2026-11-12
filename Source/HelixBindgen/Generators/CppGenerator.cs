@@ -87,12 +87,14 @@ public sealed class CppGenerator
         _c.Line("#include <Helix/Scripting/Bindings/Interop.h>");
         _c.Line("#include <Helix/Scripting/Bindings/Marshal.h>");
         _c.Line("#include <Helix/Scripting/Types/TypeBuilder.h>");
+        _c.Line("#include <Helix/Scripting/Scripts/NativeScript.h>");
         _c.Line();
         foreach (string inc in includes)
             _c.Line($"#include {inc}");
         _c.Line();
         _c.Line("#include <bit>");
         _c.Line("#include <cstddef>");
+        _c.Line("#include <new>");
         _c.Line("#include <type_traits>");
         _c.Line();
         WriteLayoutChecks();
@@ -136,7 +138,8 @@ public sealed class CppGenerator
     void WritePrivateAccess()
     {
         var fields = Own.SelectMany(t => t.Fields.Where(f => f.Tag.Has("Private") && !f.Static).Select(f => (t, f))).ToList();
-        if (fields.Count == 0)
+        var methods = Own.Where(_b.IsScriptClass).SelectMany(t => _b.ScriptMethods(t)).Where(x => !x.Method.Public).Distinct().ToList();
+        if (fields.Count == 0 && methods.Count == 0)
             return;
         _c.Line("template <class Tag, typename Tag::Type Member>");
         _c.Open("struct HxAccess");
@@ -152,7 +155,60 @@ public sealed class CppGenerator
             _c.Close("};");
             _c.Line($"template struct HxAccess<HxTag{k}, &{Q(t)}::{f.Name}>;");
         }
+        // Private methods of script classes: their member function pointers the same way.
+        foreach ((MethodModel m, TypeModel owner) in methods)
+        {
+            int k = _privateMethods.Count;
+            _privateMethods[m] = k;
+            string args = m.Parameters.Count == 1 ? "bool" : "";
+            _c.Open($"struct HxMTag{k}");
+            _c.Line($"using Type = void ({Q(owner)}::*)({args}){(m.Const ? " const" : "")};");
+            _c.Line($"friend Type HxMember(HxMTag{k});");
+            _c.Close("};");
+            _c.Line($"template struct HxAccess<HxMTag{k}, &{Q(owner)}::{m.Name}>;");
+        }
         _c.Line();
+    }
+
+    readonly Dictionary<MethodModel, int> _privateMethods = new();
+
+    // The script classes of the module: how they are made and copied, and their methods without arguments or with one
+    // bool (the engine finds its messages among them).
+    void WriteScriptClasses(Dictionary<TypeModel, string> ids)
+    {
+        foreach (TypeModel t in _b.Ordered().Where(_b.IsScriptClass))
+        {
+            string q = Q(t);
+            string root = Q(_b.RootOf(t));
+            string k = ids[t];
+            List<(MethodModel Method, TypeModel Owner)> methods = _b.ScriptMethods(t);
+            _c.Open();
+            _c.Open($"static const NativeScriptMethod methods[] =");
+            foreach ((MethodModel m, TypeModel owner) in methods)
+            {
+                string self = $"static_cast<{q}*>(static_cast<{root}*>(p))";
+                string call = _privateMethods.TryGetValue(m, out int pk) ? $"({self}->*HxMember(HxMTag{pk}{{}}))" : $"{self}->{m.Name}";
+                _c.Line(m.Parameters.Count == 0
+                    ? $"NativeScriptMethod{{\"{m.Name}\", [](void* p) {{ {call}(); }}, nullptr}},"
+                    : $"NativeScriptMethod{{\"{m.Name}\", nullptr, [](void* p, bool v) {{ {call}(v); }}}},");
+            }
+            if (methods.Count == 0)
+                _c.Line("NativeScriptMethod{},");
+            _c.Close("};");
+            _c.Line("NativeScriptClass c;");
+            _c.Line($"c.type = {k};");
+            _c.Line($"c.module = \"{_b.Module.Name}\";");
+            _c.Line($"c.nameSpace = \"{t.CsNamespace}\";");
+            _c.Line($"c.name = \"{t.RegistryName}\";");
+            _c.Line($"c.size = u32(sizeof({q}));");
+            _c.Line($"c.alignment = u32(alignof({q}));");
+            _c.Line($"c.construct = [](void* m) -> void* {{ return static_cast<{root}*>(new (m) {q}()); }};");
+            _c.Line($"c.clone = [](void* m, const void* o) -> void* {{ return static_cast<{root}*>(new (m) {q}(*static_cast<const {q}*>(static_cast<const {root}*>(o)))); }};");
+            _c.Line($"c.methods = Span<const NativeScriptMethod>(methods, {methods.Count}u);");
+            _c.Line($"c.executionOrder = {(int.TryParse(t.Tag.Get("Order"), out int order) ? order : 0)};");
+            _c.Line("RegisterNativeScriptClass(c);");
+            _c.Close();
+        }
     }
 
     string MemberPointer(TypeModel t, FieldModel f) => _privateTags.TryGetValue(f, out int k) ? $"HxMember(HxTag{k}{{}})" : $"&{Q(t)}::{f.Name}";
@@ -840,6 +896,7 @@ public sealed class CppGenerator
         }
         foreach (TypeModel t in types)
             WriteBuilder(t, ids[t]);
+        WriteScriptClasses(ids);
         _c.Line($"RegisterNativeFunctions(\"{_b.Module.Name}\", kHxFunctions, {_b.Thunks.Count}u);");
         _c.Line("done = true;");
         _c.Line("return true;");

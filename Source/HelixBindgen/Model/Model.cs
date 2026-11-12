@@ -78,6 +78,7 @@ public sealed class MethodModel
     public bool Const;
     /// <summary>Pure virtual (= 0).</summary>
     public bool Abstract;
+    public bool Public = true;
     /// <summary>A C++ constructor (tagged HX_FUNCTION(Constructor)), not a static factory.</summary>
     public bool RealConstructor;
     public TagArgs Tag = new();
@@ -129,6 +130,8 @@ public sealed class TypeModel
     public List<PropertyModel> Properties = new();
     public List<EventModel> Events = new();
     public List<EnumValueModel> EnumValues = new();
+    /// <summary>The functions without a tag (any access): property setters and the methods of script classes.</summary>
+    public List<MethodModel> Untagged = new();
     public TypeRef? Underlying;
     /// <summary>Set when the type is nested in another tagged type.</summary>
     public TypeModel? Outer;

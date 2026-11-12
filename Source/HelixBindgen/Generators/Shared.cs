@@ -109,6 +109,35 @@ public sealed class Binding
     /// <summary>Where C# declares a virtual function first: the overridable of the method's own class.</summary>
     public bool IsFirstDeclaration(TypeModel owner, MethodModel m) => ChainVirtuals(owner).Any(o => o.First == m);
 
+    /// <summary>A class of the module deriving from a script base class (HX_CLASS(ScriptBase)), made by its engine.</summary>
+    public bool IsScriptClass(TypeModel t) =>
+        !t.External && t.Kind == TypeKind.Class && IsObjectClass(t) && !t.Tag.Has("ScriptBase") && !t.Tag.Has("Abstract") &&
+        BaseChain(t).Skip(1).Any(b => b.Tag.Has("ScriptBase"));
+
+    /// <summary>The methods of a script class an engine may call: no arguments or one bool, returning nothing, of the
+    /// class and its bases below the script base (the nearest of a name and signature).</summary>
+    public List<(MethodModel Method, TypeModel Owner)> ScriptMethods(TypeModel t)
+    {
+        var list = new List<(MethodModel, TypeModel)>();
+        var seen = new HashSet<string>();
+        foreach (TypeModel c in BaseChain(t))
+        {
+            if (c.Tag.Has("ScriptBase"))
+                break;
+            foreach (MethodModel m in c.Methods.Concat(c.Untagged))
+            {
+                if (m.Static || m.RealConstructor || m.Return.Name != "void" || m.Return.Pointers != 0)
+                    continue;
+                bool boolArg = m.Parameters.Count == 1 && m.Parameters[0].Type.Name == "bool" && m.Parameters[0].Type.Pointers == 0 && !m.Parameters[0].Type.Reference;
+                if (m.Parameters.Count != 0 && !boolArg)
+                    continue;
+                if (seen.Add(m.Name + "/" + m.Parameters.Count))
+                    list.Add((m, c));
+            }
+        }
+        return list;
+    }
+
     public IEnumerable<TypeModel> ImplementersOf(TypeModel i) =>
         Module.Types.Where(t => !t.External && t.Kind == TypeKind.Class && IsObjectClass(t) && InterfacesOf(t).Contains(i));
 

@@ -145,13 +145,14 @@ public sealed class Parser
                 }
                 continue;
             }
-            // An untagged public function of a tagged type: kept for pairing properties; nothing else is needed.
-            if (owner != null && isPublic)
+            // An untagged function of a tagged type: kept for pairing properties (public ones) and for the methods of
+            // script classes (any access).
+            if (owner != null)
             {
                 int start = _pos;
                 try
                 {
-                    ParseMember(owner, null, new TagArgs(), Here(), true);
+                    ParseMember(owner, null, new TagArgs(), Here(), isPublic);
                     continue;
                 }
                 catch (BindgenException)
@@ -220,7 +221,8 @@ public sealed class Parser
             {
                 _pos++;
                 Token v = Next();
-                args.Values[key] = v.Text;
+                // A negative number is two tokens.
+                args.Values[key] = v.Is("-") && Peek().Kind == TokenKind.Number ? "-" + Next().Text : v.Text;
             }
             else
                 args.Flags.Add(key);
@@ -279,6 +281,8 @@ public sealed class Parser
         if (Peek().Is(";"))
             _pos++;
         PairProperties(type);
+        if (_untagged.TryGetValue(type, out var others))
+            type.Untagged.AddRange(others);
         _module.Types.Add(type);
     }
 
@@ -524,7 +528,7 @@ public sealed class Parser
                 {
                     Name = name, Return = new TypeRef { Name = owner.Name, Pointers = 1 }, Static = true, RealConstructor = true, Tag = args, Where = where,
                 }
-                : new MethodModel { Name = name, Return = ParseTypeTokens(head), Static = isStatic, Virtual = isVirtual, Tag = args, Where = where };
+                : new MethodModel { Name = name, Return = ParseTypeTokens(head), Static = isStatic, Virtual = isVirtual, Tag = args, Where = where, Public = isPublic };
             _pos++;
             while (!Peek().Is(")"))
             {
@@ -687,7 +691,7 @@ public sealed class Parser
             if (p.Getter.Tag.Has("ReadOnly"))
                 continue;
             string setter = p.Getter.Tag.Get("Setter") ?? ("Set" + char.ToUpperInvariant(p.Getter.Name[0]) + p.Getter.Name[1..]);
-            p.Setter = type.Methods.Concat(untagged ?? new List<MethodModel>())
+            p.Setter = type.Methods.Concat((untagged ?? new List<MethodModel>()).Where(m => m.Public))
                 .FirstOrDefault(m => m.Name == setter && m.Parameters.Count == 1 && m.Static == p.Getter.Static);
             if (p.Setter != null)
                 type.Methods.Remove(p.Setter);
