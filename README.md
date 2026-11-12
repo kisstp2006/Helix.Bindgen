@@ -77,6 +77,11 @@ private:
   (`counter.Changed.Add({function, user})`, `Remove(token)`), and Action / Func arguments take C++ functions.
 - Registration: every type of the module in the scripting core with fields by offset or by accessor, methods,
   properties and events with invokers on Variants, so reflection, serialization and tools reach both languages alike.
+  The types of the modules a module references (`REFERENCES`) are found by name, so a module in a binary of its own
+  (a game module loaded at run time) knows them.
+- Scripts: a class deriving from a class tagged `ScriptBase` (the engine's GameBehaviour) is a script class: its
+  message methods (public or not, no virtual needed) and its methods without arguments or with one bool are
+  registered as a `NativeScriptClass` with function pointers; the tag argument `Order = <n>` is its DefaultExecutionOrder.
 
 Release, Ryzen 7 3750H, the sample module (its id lookup is a list search):
 

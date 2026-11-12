@@ -880,6 +880,13 @@ public sealed class CppGenerator
         _c.Line($"ModuleId mod = FindModule(\"{_b.Module.Name}\");");
         _c.Line("if (!mod.IsValid())");
         _c.Line($"    mod = RegisterModule(\"{_b.Module.Name}\", ModuleKind::{moduleKind});");
+        // The types of the modules this one references, found by name: a module in a binary of its own (a game module
+        // against the shared engine on Windows) has its own TypeOf slots, which the other binary filled.
+        foreach (TypeModel t in _b.Module.Types.Where(t => t.External))
+        {
+            _c.Line($"if (!TypeOf<{Q(t)}>().IsValid())");
+            _c.Line($"    BindNativeType<{Q(t)}>(FindType(\"{t.CsNamespace}.{t.RegistryName}\"));");
+        }
         foreach (TypeModel t in types)
         {
             TypeModel? baseModel = t.Kind == TypeKind.Class ? _b.BaseOf(t) : null;
