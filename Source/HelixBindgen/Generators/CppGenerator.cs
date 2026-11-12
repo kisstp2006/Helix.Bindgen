@@ -859,6 +859,7 @@ public sealed class CppGenerator
         _c.Line("nullptr,");
         _c.Close("};");
         _c.Line($"u32 gHxTypes[{_b.Ordered().Count + 1}] = {{}};");
+        _c.Line("bool gHxRegistered = false;");
     }
 
     // ------------------------------------------------------------------------------------------- registration
@@ -874,8 +875,7 @@ public sealed class CppGenerator
         _c.Open($"HX_BINDINGS_EXPORT bool HxBindings_{ModuleIdent}_Register()");
         _c.Line("using namespace ::helix;");
         _c.Line("using namespace ::helix::scripting;");
-        _c.Line("static bool done = false;");
-        _c.Line("if (done)");
+        _c.Line("if (gHxRegistered)");
         _c.Line("    return true;");
         _c.Line($"ModuleId mod = FindModule(\"{_b.Module.Name}\");");
         _c.Line("if (!mod.IsValid())");
@@ -898,7 +898,7 @@ public sealed class CppGenerator
             WriteBuilder(t, ids[t]);
         WriteScriptClasses(ids);
         _c.Line($"RegisterNativeFunctions(\"{_b.Module.Name}\", kHxFunctions, {_b.Thunks.Count}u);");
-        _c.Line("done = true;");
+        _c.Line("gHxRegistered = true;");
         _c.Line("return true;");
         _c.Close();
         _c.Line();
@@ -910,6 +910,15 @@ public sealed class CppGenerator
         _c.Line("::helix::scripting::SetManagedHandleRelease(std::bit_cast<void (*)(::helix::u64)>(table[0]));");
         _c.Line($"::helix::scripting::RegisterManagedFunctions(\"{_b.Module.Name}\", table, count);");
         _c.Line("return true;");
+        _c.Close();
+        _c.Line();
+        _c.Line("// The module goes (its script classes, its types); Register makes them again.");
+        _c.Open($"HX_BINDINGS_EXPORT void HxBindings_{ModuleIdent}_Unregister()");
+        _c.Line("if (!gHxRegistered)");
+        _c.Line("    return;");
+        _c.Line("gHxRegistered = false;");
+        _c.Line($"::helix::scripting::UnregisterNativeScriptClasses(\"{_b.Module.Name}\");");
+        _c.Line($"::helix::scripting::UnloadModule(::helix::scripting::FindModule(\"{_b.Module.Name}\"));");
         _c.Close();
         _c.Line();
         _c.Line("// The function table and the hash of its shape (the C# side checks both).");
@@ -927,7 +936,7 @@ public sealed class CppGenerator
         _c.Line();
         _c.Line("// The exports by name (RegisterNativeExport), for hosts that find them without the system's symbols.");
         _c.Open($"HX_BINDINGS_EXPORT void HxBindings_{ModuleIdent}_Publish()");
-        foreach (string e in new[] { "Register", "SetManaged", "Functions", "Types" })
+        foreach (string e in new[] { "Register", "Unregister", "SetManaged", "Functions", "Types" })
             _c.Line($"::helix::scripting::RegisterNativeExport(\"HxBindings_{ModuleIdent}_{e}\", std::bit_cast<const void*>(&HxBindings_{ModuleIdent}_{e}));");
         _c.Close();
     }
