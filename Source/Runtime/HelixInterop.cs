@@ -151,35 +151,111 @@ namespace Helix.Interop
             lock (s_ToNative)
                 return s_FromNative.TryGetValue(nativeId, out Type type) ? type : null;
         }
+
+        /// <summary>A type of a loaded module (generated), not one of C# code deriving from one.</summary>
+        public static bool IsGenerated(Type type)
+        {
+            lock (s_ToNative)
+                return type != null && s_ToNative.ContainsKey(type);
+        }
+
+        /// <summary>The native id of the nearest generated type of an object's class.</summary>
+        public static uint OfObject(Type type)
+        {
+            for (Type t = type; t != null; t = t.BaseType)
+                lock (s_ToNative)
+                    if (s_ToNative.TryGetValue(t, out uint id))
+                        return id;
+            throw new ArgumentException($"{type} derives from no type of a loaded module");
+        }
+
+        /// <summary>The C# class overrides a method of a generated class (its nearest declaration is not generated).</summary>
+        public static bool Overrides(Type type, string name, Type[] parameters)
+        {
+            System.Reflection.MethodInfo m = type.GetMethod(name, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public |
+                                                                  System.Reflection.BindingFlags.NonPublic, null, parameters, null);
+            return m != null && !IsGenerated(m.DeclaringType);
+        }
     }
 
-    /// <summary>The wrappers of native objects: one per id while it is alive, made by the factory of its dynamic type.</summary>
+    /// <summary>The wrapper slot of a module's root class: its GC handle read and set by id.</summary>
+    public sealed unsafe class RootFunctions
+    {
+        public readonly delegate* unmanaged[Cdecl]<ulong, ulong*, int> GetWrapper;
+        public readonly delegate* unmanaged[Cdecl]<ulong, ulong, int> SetWrapper;
+
+        public RootFunctions(void* getWrapper, void* setWrapper)
+        {
+            GetWrapper = (delegate* unmanaged[Cdecl]<ulong, ulong*, int>)getWrapper;
+            SetWrapper = (delegate* unmanaged[Cdecl]<ulong, ulong, int>)setWrapper;
+        }
+    }
+
+    /// <summary>
+    /// The wrappers of native objects: one per native object, its GC handle in the object's wrapper slot (weak for
+    /// wrappers made here, which hold nothing of their own; strong for objects of C# classes deriving from generated
+    /// ones, set by the native side when it makes them), made by the factory of the object's dynamic type.
+    /// </summary>
     public static class Objects
     {
-        static readonly Dictionary<uint, Func<ObjectId, object>> s_ByNative = new();
-        static readonly Dictionary<Type, Func<ObjectId, object>> s_ByType = new();
-        static readonly Dictionary<ulong, WeakReference<object>> s_Wrappers = new();
+        sealed class Factory
+        {
+            public Type Type;
+            public Func<ObjectId, object> Make;
+            public RootFunctions Root;
+        }
+
+        static readonly Dictionary<uint, Factory> s_ByNative = new();
+        static readonly Dictionary<Type, Factory> s_ByType = new();
         static readonly ConditionalWeakTable<object, StrongBox<ulong>> s_Ids = new();
 
-        public static void RegisterFactory(uint nativeType, Type type, Func<ObjectId, object> factory)
+        public static void RegisterFactory(uint nativeType, Type type, Func<ObjectId, object> factory, RootFunctions root)
         {
-            lock (s_Wrappers)
+            var f = new Factory { Type = type, Make = factory, Root = root };
+            lock (s_ByNative)
             {
-                s_ByNative[nativeType] = factory;
-                s_ByType[type] = factory;
+                s_ByNative[nativeType] = f;
+                s_ByType[type] = f;
             }
         }
 
-        /// <summary>A wrapper made by its own constructor (a native object it created).</summary>
-        public static void Adopt(object wrapper, ulong id)
+        /// <summary>Frees a GC handle native code held (the wrapper slot of a destroyed object).</summary>
+        [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+        public static void ReleaseHandle(ulong handle)
+        {
+            try
+            {
+                if (handle != 0)
+                    GCHandle.FromIntPtr((IntPtr)handle).Free();
+            }
+            catch (Exception e)
+            {
+                Native.ReportException(e);
+            }
+        }
+
+        /// <summary>The id of a wrapper, for IdOf (the wrapper's own constructor made the native object).</summary>
+        public static void Remember(object wrapper, ulong id)
+        {
+            if (id != 0)
+                lock (s_ByNative)
+                    s_Ids.AddOrUpdate(wrapper, new StrongBox<ulong>(id));
+        }
+
+        /// <summary>A wrapper its constructor made a native object for: its weak handle put in the object's slot.</summary>
+        public static unsafe void Attach(object wrapper, ulong id, Type generated)
         {
             if (id == 0)
                 return;
-            lock (s_Wrappers)
-            {
-                s_Wrappers[id] = new WeakReference<object>(wrapper);
-                s_Ids.AddOrUpdate(wrapper, new StrongBox<ulong>(id));
-            }
+            Remember(wrapper, id);
+            Factory f;
+            lock (s_ByNative)
+                s_ByType.TryGetValue(generated, out f);
+            if (f == null)
+                return;
+            ulong handle = (ulong)GCHandle.ToIntPtr(GCHandle.Alloc(wrapper, GCHandleType.Weak));
+            if (f.Root.SetWrapper(id, handle) != 0)
+                GCHandle.FromIntPtr((IntPtr)handle).Free();
         }
 
         /// <summary>The native id of a wrapper (0 for null and for objects that wrap nothing).</summary>
@@ -187,15 +263,15 @@ namespace Helix.Interop
         {
             if (wrapper == null)
                 return 0;
-            lock (s_Wrappers)
+            lock (s_ByNative)
                 return s_Ids.TryGetValue(wrapper, out StrongBox<ulong> id) ? id.Value : 0;
         }
 
-        /// <summary>A wrapper as native code takes it: its id and its type's native id.</summary>
+        /// <summary>A wrapper as native code takes it: its id and the native id of its nearest generated type.</summary>
         public static InteropObject Pass(object wrapper)
         {
             ulong id = IdOf(wrapper);
-            return id == 0 ? default : new InteropObject { id = id, type = Types.Of(wrapper.GetType()) };
+            return id == 0 ? default : new InteropObject { id = id, type = Types.OfObject(wrapper.GetType()) };
         }
 
         /// <summary>A new GC handle of a C# object for native code (0 for null); native code frees it.</summary>
@@ -203,21 +279,27 @@ namespace Helix.Interop
 
         public static T Wrap<T>(InteropObject o) where T : class => Wrap<T>(o.id, o.type);
 
-        public static T Wrap<T>(ulong id, uint nativeType) where T : class
+        public static unsafe T Wrap<T>(ulong id, uint nativeType) where T : class
         {
             if (id == 0)
                 return null;
-            lock (s_Wrappers)
-            {
-                if (s_Wrappers.TryGetValue(id, out WeakReference<object> weak) && weak.TryGetTarget(out object known) && known is T same)
-                    return same;
-                if (!s_ByNative.TryGetValue(nativeType, out Func<ObjectId, object> factory) && !s_ByType.TryGetValue(typeof(T), out factory))
-                    throw new InvalidOperationException($"no wrapper for native type {nativeType} or {typeof(T)}");
-                object made = factory(new ObjectId(id));
-                s_Wrappers[id] = new WeakReference<object>(made);
-                s_Ids.AddOrUpdate(made, new StrongBox<ulong>(id));
-                return (T)made;
-            }
+            Factory f;
+            lock (s_ByNative)
+                if (!s_ByNative.TryGetValue(nativeType, out f) || f.Make == null)
+                    s_ByType.TryGetValue(typeof(T), out f);
+            if (f == null || f.Make == null)
+                throw new InvalidOperationException($"no wrapper for native type {nativeType} or {typeof(T)}");
+            // The wrapper the object has, while it lives.
+            ulong handle = 0;
+            if (f.Root.GetWrapper(id, &handle) == 0 && handle != 0 && GCHandle.FromIntPtr((IntPtr)handle).Target is T known)
+                return known;
+            object made = f.Make(new ObjectId(id));
+            Remember(made, id);
+            ulong weak = (ulong)GCHandle.ToIntPtr(GCHandle.Alloc(made, GCHandleType.Weak));
+            // The slot frees what it held before (a wrapper that was collected).
+            if (f.Root.SetWrapper(id, weak) != 0)
+                GCHandle.FromIntPtr((IntPtr)weak).Free();
+            return (T)made;
         }
 
         public static unsafe T[] WrapArray<T>(InteropArray a) where T : class

@@ -76,6 +76,10 @@ public sealed class MethodModel
     public bool Static;
     public bool Virtual;
     public bool Const;
+    /// <summary>Pure virtual (= 0).</summary>
+    public bool Abstract;
+    /// <summary>A C++ constructor (tagged HX_FUNCTION(Constructor)), not a static factory.</summary>
+    public bool RealConstructor;
     public TagArgs Tag = new();
     public Location Where = new();
     public string CsName => Tag.Get("Name") ?? Name;

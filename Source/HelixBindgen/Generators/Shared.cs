@@ -52,9 +52,99 @@ public sealed class Binding
         Module = module;
         Map = new TypeMap(module);
         foreach (TypeModel t in module.Types)
+        {
             Roots[t] = FindRoot(t);
+            foreach (MethodModel m in t.Methods)
+                OwnerOf[m] = t;
+        }
         Validate();
+        CollectBridge();
         Collect();
+    }
+
+    public readonly Dictionary<MethodModel, TypeModel> OwnerOf = new();
+
+    // ----------------------------------------------------------------------------------------------- the bridge
+
+    /// <summary>The functions the C# side hands the native module: the handle release, then the C# virtual
+    /// functions (one per first declaration) and the C# implementations of the module's interfaces.</summary>
+    public readonly List<ManagedEntry> Managed = new();
+    public readonly Dictionary<TypeModel, List<Overridable>> Overridables = new();
+    readonly Dictionary<MethodModel, ManagedEntry> _virtualExports = new();
+
+    public static string Key(MethodModel m) => m.Name + "(" + string.Join(",", m.Parameters.Select(p => p.Type.Spelling())) + ")" + (m.Const ? "const" : "");
+
+    /// <summary>A class C# may derive from: objects cross as ids, not sealed, with a tagged C++ constructor.</summary>
+    public bool IsDerivable(TypeModel t) =>
+        !t.External && t.Kind == TypeKind.Class && IsObjectClass(t) && !t.Tag.Has("Sealed") && t.Methods.Any(m => m.RealConstructor && !m.Tag.Has("Hidden"));
+
+    /// <summary>Tagged pure virtual functions without a nearer C++ implementation (the class is abstract in C++).</summary>
+    public bool IsAbstractCpp(TypeModel t) => t.Tag.Has("Abstract") || ChainVirtuals(t).Any(o => o.Pure);
+
+    // The tagged virtual functions of a class and its bases: the nearest declaration of each signature (whose C++
+    // implementation a base call reaches) and the first one (where C# declares the method virtual).
+    public List<Overridable> ChainVirtuals(TypeModel t)
+    {
+        var list = new List<Overridable>();
+        var byKey = new Dictionary<string, Overridable>();
+        foreach (TypeModel c in BaseChain(t))
+            foreach (MethodModel m in c.Methods.Where(m => m.Virtual && !m.Static && !m.Tag.Has("Hidden")))
+            {
+                string key = Key(m);
+                if (byKey.TryGetValue(key, out Overridable? o))
+                {
+                    o.First = m;
+                    o.Declarer = c;
+                    continue;
+                }
+                o = new Overridable { Nearest = m, NearestOwner = c, First = m, Declarer = c, Pure = m.Abstract };
+                byKey[key] = o;
+                list.Add(o);
+            }
+        for (int i = 0; i < list.Count; i++)
+            list[i].Bit = i;
+        return list;
+    }
+
+    /// <summary>Where C# declares a virtual function first: the overridable of the method's own class.</summary>
+    public bool IsFirstDeclaration(TypeModel owner, MethodModel m) => ChainVirtuals(owner).Any(o => o.First == m);
+
+    public IEnumerable<TypeModel> ImplementersOf(TypeModel i) =>
+        Module.Types.Where(t => !t.External && t.Kind == TypeKind.Class && IsObjectClass(t) && InterfacesOf(t).Contains(i));
+
+    void CollectBridge()
+    {
+        Managed.Add(new ManagedEntry { Kind = ExportKind.Release, Name = "HxReleaseHandle" });
+        foreach (TypeModel t in Module.Types.Where(IsDerivable))
+        {
+            List<Overridable> list = ChainVirtuals(t);
+            if (list.Count > 64)
+                throw new BindgenException(t.Where, $"{t.Name}: more than 64 virtual functions C# could override");
+            Overridables[t] = list;
+            foreach (Overridable o in list)
+            {
+                if (!_virtualExports.TryGetValue(o.First, out ManagedEntry? e))
+                {
+                    e = new ManagedEntry { Kind = ExportKind.Virtual, Method = o.First, Owner = o.Declarer, Name = $"HxVirtual_{o.Declarer.Ident}_{o.First.Name}" };
+                    _virtualExports[o.First] = e;
+                    Managed.Add(e);
+                }
+                o.Export = e;
+            }
+        }
+        foreach (TypeModel i in Module.Types.Where(t => !t.External && t.Kind == TypeKind.Interface))
+            foreach (MethodModel m in i.Methods.Where(m => !m.Static && !m.Tag.Has("Hidden")))
+                Managed.Add(new ManagedEntry { Kind = ExportKind.Interface, Method = m, Owner = i, Name = $"HxInterface_{i.Ident}_{m.Name}" });
+        var used = new Dictionary<string, int>();
+        for (int k = 0; k < Managed.Count; k++)
+        {
+            ManagedEntry e = Managed[k];
+            e.Index = k;
+            used.TryGetValue(e.Name, out int n);
+            used[e.Name] = n + 1;
+            if (n > 0)
+                e.Name += "_" + n;
+        }
     }
 
     public string Ident(string text) => new string(text.Select(c => char.IsLetterOrDigit(c) ? c : '_').ToArray());
@@ -134,8 +224,27 @@ public sealed class Binding
                                            Name = Name("set_" + p.CsName), Static = p.Static, Property = p, IsSetter = true });
             }
             foreach (MethodModel mm in t.Methods.Where(m => !m.Tag.Has("Hidden")))
+            {
+                // A C++ class that is abstract is made only as the subclass of a C# class.
+                if (mm.RealConstructor && IsAbstractCpp(t))
+                    continue;
                 Thunks.Add(new Thunk { Kind = ThunkKind.Method, Owner = t, Method = mm, Type = Map.Map(mm.Return, mm.Where, $"{t.Name}.{mm.Name}"),
-                                       Name = Name(mm.Name), Static = mm.Static || mm.Tag.Has("Constructor") });
+                                       Name = Name(mm.RealConstructor ? "New" : mm.Name), Static = mm.Static || mm.Tag.Has("Constructor") });
+            }
+            if (Roots[t] == t)
+            {
+                Thunks.Add(new Thunk { Kind = ThunkKind.GetWrapper, Owner = t, Name = Name("HxGetWrapper") });
+                Thunks.Add(new Thunk { Kind = ThunkKind.SetWrapper, Owner = t, Name = Name("HxSetWrapper") });
+                Thunks.Add(new Thunk { Kind = ThunkKind.Alive, Owner = t, Name = Name("HxAlive") });
+            }
+            if (Overridables.TryGetValue(t, out List<Overridable>? virtuals))
+            {
+                foreach (MethodModel c in t.Methods.Where(m => m.RealConstructor && !m.Tag.Has("Hidden")))
+                    Thunks.Add(new Thunk { Kind = ThunkKind.NewDerived, Owner = t, Method = c, Type = Map.Map(c.Return, c.Where, t.Name), Name = Name("NewDerived"), Static = true });
+                foreach (Overridable o in virtuals)
+                    Thunks.Add(new Thunk { Kind = ThunkKind.BaseCall, Owner = t, Method = o.Nearest, Virtual = o,
+                                           Type = Map.Map(o.Nearest.Return, o.Nearest.Where, o.Nearest.Name), Name = Name("base_" + o.Nearest.Name) });
+            }
             foreach (EventModel e in t.Events.Where(e => !e.Tag.Has("Hidden")))
             {
                 Thunks.Add(new Thunk { Kind = ThunkKind.EventAdd, Owner = t, Event = e, Name = Name("add_" + e.CsName), Static = e.Static });
@@ -149,6 +258,9 @@ public sealed class Binding
         ulong h = 14695981039346656037ul;
         foreach (Thunk th in Thunks)
             foreach (char c in th.Name + "|" + th.Kind + "|" + Shape(th) + ";")
+                h = (h ^ c) * 1099511628211ul;
+        foreach (ManagedEntry e in Managed)
+            foreach (char c in e.Name + "|" + e.Kind + "|" + (e.Method != null ? Key(e.Method) : "") + ";")
                 h = (h ^ c) * 1099511628211ul;
         Hash = h;
     }
@@ -203,6 +315,43 @@ public enum ThunkKind
     Method,
     EventAdd,
     EventRemove,
+    // The root class's wrapper slot and whether an id names a live object.
+    GetWrapper,
+    SetWrapper,
+    Alive,
+    // An object of a C# class that derives from the class, and the C++ implementation of a virtual function for
+    // the C# class's base calls.
+    NewDerived,
+    BaseCall,
+}
+
+public enum ExportKind
+{
+    Release,
+    Virtual,
+    Interface,
+}
+
+/// <summary>A function the C# side exports to the native module.</summary>
+public sealed class ManagedEntry
+{
+    public ExportKind Kind;
+    public string Name = "";
+    public int Index;
+    public MethodModel? Method;
+    public TypeModel? Owner;
+}
+
+/// <summary>A virtual function a C# class deriving from a class may override.</summary>
+public sealed class Overridable
+{
+    public MethodModel Nearest = new();
+    public TypeModel NearestOwner = new();
+    public MethodModel First = new();
+    public TypeModel Declarer = new();
+    public bool Pure;
+    public int Bit;
+    public ManagedEntry Export = new();
 }
 
 public sealed class Thunk
@@ -217,6 +366,7 @@ public sealed class Thunk
     public EventModel? Event;
     public bool IsSetter;
     public bool Static;
+    public Overridable? Virtual;
     /// <summary>The field's type, or the method's return type.</summary>
     public Mapping Type = new();
     public bool Leaf => Method?.Leaf == true || Property?.Getter.Leaf == true || Field?.Tag.Has("Leaf") == true;

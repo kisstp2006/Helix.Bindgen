@@ -24,6 +24,10 @@ public enum ManagedKind
     // A native enum of the referenced headers.
     NativeEnum,
     Array,
+    // A C# interface with a proxy: implemented by a C++ class, handed to C# for the call.
+    Interface,
+    // Action or Func of values: a C++ function with a user pointer.
+    Delegate,
 }
 
 public sealed class ManagedType
@@ -38,6 +42,9 @@ public sealed class ManagedType
     public TypeModel? Native;
     public ProxyType? Proxy;
     public ManagedEnum? Enum;
+    /// <summary>Delegates: the arguments and the result.</summary>
+    public List<ManagedType> Arguments = new();
+    public ManagedType? Result;
 }
 
 public sealed class ManagedEnum
@@ -56,6 +63,8 @@ public enum ProxyMemberKind
     Constructor,
     Getter,
     Setter,
+    EventAdd,
+    EventRemove,
 }
 
 public sealed class ProxyParameter
@@ -90,15 +99,28 @@ public sealed class ProxyProperty
     public ProxyMember? Setter;
 }
 
+/// <summary>An event of a proxy: C++ handlers (a function and a user pointer) added and removed by token.</summary>
+public sealed class ProxyEvent
+{
+    public string Name = "";
+    public bool Static;
+    public ManagedType Delegate = new();
+    public ProxyMember Add = new();
+    public ProxyMember Remove = new();
+}
+
 public sealed class ProxyType
 {
     public string Namespace = "";
     public string Name = "";
     public string FullName => Namespace.Length > 0 ? Namespace + "." + Name : Name;
     public bool Abstract;
+    /// <summary>A C# interface: an abstract C++ class C++ implements; its methods are native functions C# calls.</summary>
+    public bool IsInterface;
     public List<ProxyMember> Methods = new();
     public List<ProxyMember> Constructors = new();
     public List<ProxyProperty> Properties = new();
+    public List<ProxyEvent> Events = new();
 }
 
 public sealed class ProxyModel
@@ -107,6 +129,8 @@ public sealed class ProxyModel
     public List<ProxyType> Types = new();
     public List<ManagedEnum> Enums = new();
     public List<ProxyMember> Members = new();
+    /// <summary>The C++ functions C# calls: the methods of interfaces C++ implements (the native table).</summary>
+    public List<ProxyMember> NativeMembers = new();
     public List<string> Skipped = new();
     public ulong Hash;
 }
@@ -164,13 +188,14 @@ public sealed class AssemblyReader
         {
             if (!_defs.TryGetValue(n, out TypeDefinition d))
                 throw new ArgumentException($"{n} is not a type of the assembly");
-            if ((d.Attributes & TypeAttributes.VisibilityMask) != TypeAttributes.Public || (d.Attributes & TypeAttributes.Interface) != 0)
-                throw new ArgumentException($"{n}: proxies are made for public classes");
+            if ((d.Attributes & TypeAttributes.VisibilityMask) != TypeAttributes.Public)
+                throw new ArgumentException($"{n}: proxies are made for public classes and interfaces");
             var p = new ProxyType
             {
                 Namespace = _md.GetString(d.Namespace),
                 Name = _md.GetString(d.Name),
                 Abstract = (d.Attributes & TypeAttributes.Abstract) != 0,
+                IsInterface = (d.Attributes & TypeAttributes.Interface) != 0,
             };
             _proxies[n] = p;
             _model.Types.Add(p);
@@ -187,8 +212,10 @@ public sealed class AssemblyReader
         }
         for (int i = 0; i < _model.Members.Count; i++)
             _model.Members[i].Index = i + 2;
+        for (int i = 0; i < _model.NativeMembers.Count; i++)
+            _model.NativeMembers[i].Index = i;
         ulong h = 14695981039346656037ul;
-        foreach (ProxyMember m in _model.Members)
+        foreach (ProxyMember m in _model.Members.Concat(_model.NativeMembers))
             foreach (char c in m.Thunk + "|" + m.Kind + "|" + Shape(m.Return) + string.Concat(m.Parameters.Select(p => "," + Shape(p.Type))) + ";")
                 h = (h ^ c) * 1099511628211ul;
         _model.Hash = h;
@@ -198,11 +225,103 @@ public sealed class AssemblyReader
 
     string Ident(ProxyType p) => p.FullName.Replace('.', '_');
 
+    // The kinds C++ implementations of C# interfaces and C++ handlers take and give.
+    static bool IsValue(ManagedType t) => t.Kind is ManagedKind.Primitive or ManagedKind.Bool or ManagedKind.Char or ManagedKind.Enum or ManagedKind.NativeEnum;
+
+    void InterfaceMembers(ProxyType p, TypeDefinition d)
+    {
+        var provider = new SignatureProvider(this);
+        foreach (MethodDefinitionHandle mh in d.GetMethods())
+        {
+            MethodDefinition m = _md.GetMethodDefinition(mh);
+            string name = _md.GetString(m.Name);
+            if ((m.Attributes & MethodAttributes.SpecialName) != 0 || (m.Attributes & MethodAttributes.Abstract) == 0)
+            {
+                if ((m.Attributes & MethodAttributes.SpecialName) != 0)
+                    Skip(p, name, "an interface property or event (C++ implements interface methods)");
+                continue;
+            }
+            MethodSignature<Sig> sig = m.DecodeSignature(provider, null);
+            ManagedType? r = Classify(sig.ReturnType, out string? why);
+            var member = new ProxyMember { Kind = ProxyMemberKind.Method, Name = name, Thunk = $"HxNative_{Ident(p)}_{name}" };
+            bool ok = r != null && (r.Kind == ManagedKind.Void || IsValue(r) || r.Kind == ManagedKind.String);
+            if (r != null)
+                member.Return = r;
+            var names = m.GetParameters().Select(h => _md.GetParameter(h)).Where(x => x.SequenceNumber > 0).OrderBy(x => x.SequenceNumber).ToList();
+            for (int i = 0; ok && i < sig.ParameterTypes.Length; i++)
+            {
+                ManagedType? pt = Classify(sig.ParameterTypes[i], out why);
+                ok = pt != null && !pt.ByRef && (IsValue(pt) || pt.Kind == ManagedKind.String);
+                if (ok)
+                    member.Parameters.Add(new ProxyParameter { Name = i < names.Count ? _md.GetString(names[i].Name) : $"arg{i}", Type = pt! });
+            }
+            if (!ok)
+            {
+                Skip(p, name, why ?? "an interface method C++ implements takes and gives values and strings");
+                continue;
+            }
+            p.Methods.Add(member);
+            _model.NativeMembers.Add(member);
+        }
+    }
+
+    void Events(ProxyType p, TypeDefinition d, string prefix, HashSet<MethodDefinitionHandle> accessors)
+    {
+        foreach (EventDefinitionHandle eh in d.GetEvents())
+        {
+            EventDefinition ev = _md.GetEventDefinition(eh);
+            EventAccessors acc = ev.GetAccessors();
+            accessors.Add(acc.Adder);
+            accessors.Add(acc.Remover);
+            string name = _md.GetString(ev.Name);
+            MethodDefinition adder = _md.GetMethodDefinition(acc.Adder);
+            if (!IsPublic(adder))
+                continue;
+            ManagedType? type = Classify(DecodeType(ev.Type), out string? why);
+            if (type == null || type.Kind != ManagedKind.Delegate)
+            {
+                Skip(p, name, why ?? "an event of a delegate type other than Action or Func of values");
+                continue;
+            }
+            bool isStatic = (adder.Attributes & MethodAttributes.Static) != 0;
+            var e = new ProxyEvent
+            {
+                Name = name,
+                Static = isStatic,
+                Delegate = type,
+                Add = Add(new ProxyMember { Kind = ProxyMemberKind.EventAdd, Name = name, Static = isStatic, Thunk = prefix + "add_" + name,
+                                            Parameters = { new ProxyParameter { Name = "handler", Type = type } },
+                                            Return = new ManagedType { Kind = ManagedKind.Primitive, Cs = "ulong", Cpp = "::helix::u64" } }),
+                Remove = Add(new ProxyMember { Kind = ProxyMemberKind.EventRemove, Name = name, Static = isStatic, Thunk = prefix + "remove_" + name,
+                                               Parameters = { new ProxyParameter { Name = "token", Type = new ManagedType { Kind = ManagedKind.Primitive, Cs = "ulong", Cpp = "::helix::u64" } } } }),
+            };
+            p.Events.Add(e);
+        }
+    }
+
+    Sig DecodeType(EntityHandle h)
+    {
+        var provider = new SignatureProvider(this);
+        return h.Kind switch
+        {
+            HandleKind.TypeDefinition => provider.GetTypeFromDefinition(_md, (TypeDefinitionHandle)h, 0),
+            HandleKind.TypeReference => provider.GetTypeFromReference(_md, (TypeReferenceHandle)h, 0),
+            HandleKind.TypeSpecification => _md.GetTypeSpecification((TypeSpecificationHandle)h).DecodeSignature(provider, null),
+            _ => new Sig { Unsupported = "a type Bindgen does not read" },
+        };
+    }
+
     void Members(ProxyType p, TypeDefinition d)
     {
+        if (p.IsInterface)
+        {
+            InterfaceMembers(p, d);
+            return;
+        }
         string prefix = $"Hx_{Ident(p)}_";
         var provider = new SignatureProvider(this);
         var accessors = new HashSet<MethodDefinitionHandle>();
+        Events(p, d, prefix, accessors);
         foreach (PropertyDefinitionHandle ph in d.GetProperties())
         {
             PropertyDefinition prop = _md.GetPropertyDefinition(ph);
@@ -222,9 +341,9 @@ public sealed class AssemblyReader
                 continue;
             }
             ManagedType? type = Classify(sig.ReturnType, out string? why);
-            if (type == null)
+            if (type == null || type.Kind is ManagedKind.Interface or ManagedKind.Delegate)
             {
-                Skip(p, name, why!);
+                Skip(p, name, why ?? "an interface or delegate property (they go from C++ to C# as arguments)");
                 continue;
             }
             bool isStatic = (getter.Attributes & MethodAttributes.Static) != 0;
@@ -254,9 +373,9 @@ public sealed class AssemblyReader
                 continue;
             string name = _md.GetString(f.Name);
             ManagedType? type = Classify(f.DecodeSignature(provider, null), out string? why);
-            if (type == null)
+            if (type == null || type.Kind is ManagedKind.Interface or ManagedKind.Delegate)
             {
-                Skip(p, name, why!);
+                Skip(p, name, why ?? "an interface or delegate property (they go from C++ to C# as arguments)");
                 continue;
             }
             bool isStatic = (a & FieldAttributes.Static) != 0;
@@ -289,11 +408,7 @@ public sealed class AssemblyReader
                 continue;
             bool ctor = name == ".ctor";
             if (name == ".cctor" || (!ctor && (m.Attributes & MethodAttributes.SpecialName) != 0))
-            {
-                if (name.StartsWith("add_", StringComparison.Ordinal) || name.StartsWith("remove_", StringComparison.Ordinal))
-                    Skip(p, name[(name.IndexOf('_') + 1)..], "an event (events of C# types come with the object bridge)");
                 continue;
-            }
             if (ctor && p.Abstract)
                 continue;
             if (m.GetGenericParameters().Count > 0)
@@ -324,6 +439,11 @@ public sealed class AssemblyReader
                 member.Return = new ManagedType { Kind = ManagedKind.Proxy, Proxy = p, Cs = "global::" + p.FullName };
             var names = m.GetParameters().Select(h => _md.GetParameter(h)).Where(x => x.SequenceNumber > 0).OrderBy(x => x.SequenceNumber).ToList();
             bool ok = true;
+            if (member.Return.Kind is ManagedKind.Interface or ManagedKind.Delegate)
+            {
+                Skip(p, name, "an interface or delegate result (they go from C++ to C#)");
+                continue;
+            }
             for (int i = 0; i < sig.ParameterTypes.Length; i++)
             {
                 ManagedType? pt = Classify(sig.ParameterTypes[i], out reason);
@@ -423,8 +543,10 @@ public sealed class AssemblyReader
             return null;
         }
         string name = s.Name!;
+        if (name == "System.Action" || s.Arguments.Count > 0)
+            return DelegateOf(s, out why);
         if (_proxies.TryGetValue(name, out ProxyType? proxy))
-            return new ManagedType { Kind = ManagedKind.Proxy, Proxy = proxy, Cs = "global::" + name };
+            return new ManagedType { Kind = proxy.IsInterface ? ManagedKind.Interface : ManagedKind.Proxy, Proxy = proxy, Cs = "global::" + name };
         if (_natives.TryGetValue(name, out TypeModel? native))
         {
             ManagedKind kind = native.Kind switch
@@ -445,6 +567,36 @@ public sealed class AssemblyReader
             return new ManagedType { Kind = ManagedKind.Enum, Enum = EnumOf(name, d), Cs = "global::" + name };
         why = $"{name} has no proxy (ask for it) or native type";
         return null;
+    }
+
+    // System.Action, Action<...> and Func<...> of values.
+    ManagedType? DelegateOf(Sig s, out string? why)
+    {
+        why = null;
+        bool func = s.Name!.StartsWith("System.Func`", StringComparison.Ordinal);
+        var t = new ManagedType { Kind = ManagedKind.Delegate };
+        var types = new List<ManagedType>();
+        foreach (Sig a in s.Arguments)
+        {
+            ManagedType? m = Classify(a, out why);
+            if (m == null || !IsValue(m))
+            {
+                why ??= $"a delegate of {m?.Cs} (delegates of values cross)";
+                return null;
+            }
+            types.Add(m);
+        }
+        if (func)
+        {
+            t.Result = types[^1];
+            types.RemoveAt(types.Count - 1);
+        }
+        else
+            t.Result = new ManagedType { Kind = ManagedKind.Void, Cs = "void", Cpp = "void" };
+        t.Arguments = types;
+        string all = string.Join(", ", s.Arguments.Select((_, i) => i < types.Count ? types[i].Cs : t.Result.Cs));
+        t.Cs = s.Arguments.Count == 0 ? "global::System.Action" : $"global::System.{(func ? "Func" : "Action")}<{all}>";
+        return t;
     }
 
     bool IsEnum(TypeDefinition d)
@@ -505,6 +657,8 @@ public sealed class AssemblyReader
         public bool Array;
         public bool ByRef;
         public string? Unsupported;
+        /// <summary>Action and Func instantiations: their type arguments.</summary>
+        public List<Sig> Arguments = new();
     }
 
     sealed class SignatureProvider(AssemblyReader r) : ISignatureTypeProvider<Sig, object?>
@@ -542,7 +696,14 @@ public sealed class AssemblyReader
         public Sig GetPinnedType(Sig elementType) => elementType;
         public Sig GetModifiedType(Sig modifier, Sig unmodifiedType, bool isRequired) => unmodifiedType;
         public Sig GetFunctionPointerType(MethodSignature<Sig> signature) => No("a function pointer");
-        public Sig GetGenericInstantiation(Sig genericType, ImmutableArray<Sig> typeArguments) => No("a generic type");
+        public Sig GetGenericInstantiation(Sig genericType, ImmutableArray<Sig> typeArguments)
+        {
+            string name = genericType.Name ?? "";
+            if (!name.StartsWith("System.Action`", StringComparison.Ordinal) && !name.StartsWith("System.Func`", StringComparison.Ordinal))
+                return No("a generic type");
+            Sig? bad = typeArguments.FirstOrDefault(a => a.Unsupported != null);
+            return bad ?? new Sig { Name = name, Arguments = typeArguments.ToList() };
+        }
         public Sig GetGenericMethodParameter(object? genericContext, int index) => No("a generic parameter");
         public Sig GetGenericTypeParameter(object? genericContext, int index) => No("a generic parameter");
         public Sig GetTypeFromSpecification(MetadataReader reader, object? genericContext, TypeSpecificationHandle handle, byte rawTypeKind) =>

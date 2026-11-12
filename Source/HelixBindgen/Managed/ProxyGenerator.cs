@@ -34,7 +34,8 @@ public sealed class ProxyGenerator
         {
             var taken = new HashSet<string>(p.Properties.Select(x => x.Name));
             taken.UnionWith(locals);
-            foreach (ProxyMember m in p.Methods.Concat(p.Constructors).Concat(p.Properties.Select(x => x.Setter).OfType<ProxyMember>()))
+            foreach (ProxyMember m in p.Methods.Concat(p.Constructors).Concat(p.Properties.Select(x => x.Setter).OfType<ProxyMember>())
+                                              .Concat(p.Events.SelectMany(e => new[] { e.Add, e.Remove })))
                 foreach (ProxyParameter pa in m.Parameters)
                 {
                     pa.CppName = pa.Name;
@@ -69,9 +70,14 @@ public sealed class ProxyGenerator
         ManagedKind.String => "::helix::StringView",
         ManagedKind.NativeStruct => $"const {t.Cpp}&",
         ManagedKind.Proxy => $"const {Q(t.Proxy!)}&",
+        ManagedKind.Interface => $"{Q(t.Proxy!)}&",
         ManagedKind.Array => $"::helix::Span<const {CppValue(t.Element!)}>",
         _ => CppValue(t),
     });
+
+    // Action / Func: a C++ function and a user pointer.
+    string CallbackType(ManagedType t) =>
+        $"::helix::scripting::Callback<{(t.Result!.Kind == ManagedKind.Void ? "void" : CppValue(t.Result))}({string.Join(", ", t.Arguments.Select(CppValue))})>";
 
     string CppValue(ManagedType t) => t.Kind switch
     {
@@ -79,6 +85,7 @@ public sealed class ProxyGenerator
         ManagedKind.Proxy => Q(t.Proxy!),
         ManagedKind.NativeObject => t.Cpp + "*",
         ManagedKind.Array => $"::helix::Array<{CppValue(t.Element!)}>",
+        ManagedKind.Delegate => CallbackType(t),
         _ => t.Cpp,
     };
 
@@ -106,6 +113,8 @@ public sealed class ProxyGenerator
             ManagedKind.NativeObject => (new() { "::helix::u64", "::helix::u32" }, new() { $"{n}_o.id", $"{n}_o.type" },
                                          $"::helix::scripting::InteropObject {n}_o = ::helix::scripting::PassObject<{Root(t.Native!)}>({n});"),
             ManagedKind.Array => (new() { $"const {CppValue(t.Element!)}*", "::helix::i32" }, new() { $"{n}.Data()", $"::helix::i32({n}.Size())" }, null),
+            ManagedKind.Interface => (new() { "void*" }, new() { $"static_cast<void*>(&{n})" }, null),
+            ManagedKind.Delegate => (new() { "void*", "void*" }, new() { $"std::bit_cast<void*>({n}.function)", $"{n}.user" }, null),
             _ => (new() { CppValue(t) }, new() { n }, null),
         };
     }
@@ -173,8 +182,24 @@ public sealed class ProxyGenerator
 
     string Ret(ProxyMember m) => m.Return.Kind == ManagedKind.Void ? "void" : CppValue(m.Return);
 
+    void InterfaceClass(Code c, ProxyType p)
+    {
+        c.Line($"// The C# interface {p.FullName}: a C++ class implements it and is handed to C# for a call.");
+        c.Open($"class {p.Name}");
+        c.Line("public:", -1);
+        c.Line($"virtual ~{p.Name}() = default;");
+        foreach (ProxyMember m in p.Methods)
+            c.Line($"virtual {Ret(m)} {m.Name}({Params(m)}) = 0;");
+        c.Close("};");
+    }
+
     void ProxyClass(Code c, ProxyType p)
     {
+        if (p.IsInterface)
+        {
+            InterfaceClass(c, p);
+            return;
+        }
         c.Line($"// The C# class {p.FullName}: a value holding a GC handle of the object (empty for null). Copies hold");
         c.Line("// handles of their own; the object lives while one does.");
         c.Open($"class {p.Name}");
@@ -216,6 +241,17 @@ public sealed class ProxyGenerator
                 c.Line($"{s}& operator=(const {s}&) = delete;");
             c.Close("};");
             c.Line(prop.Static ? $"static inline {s} {prop.Name}{{}};" : $"HX_NO_UNIQUE_ADDRESS {s} {prop.Name};");
+        }
+        foreach (ProxyEvent e in p.Events)
+        {
+            string s = $"HxEvent_{e.Name}";
+            c.Line();
+            c.Line($"// The C# event {e.Name}: Add answers a token Remove takes.");
+            c.Open($"struct {s}");
+            c.Line($"::helix::u64 Add({CallbackType(e.Delegate)} handler) const;");
+            c.Line("void Remove(::helix::u64 token) const;");
+            c.Close("};");
+            c.Line(e.Static ? $"static inline {s} {e.Name}{{}};" : $"HX_NO_UNIQUE_ADDRESS {s} {e.Name};");
         }
         c.Line();
         c.Line("private:", -1);
@@ -261,9 +297,80 @@ public sealed class ProxyGenerator
         c.Line($"::helix::scripting::RegisterManagedFunctions(\"{_m.Module}\", table, count);");
         c.Line("return true;");
         c.Close();
-        foreach (ProxyType p in _m.Types)
+        foreach (ProxyType p in _m.Types.Where(t => !t.IsInterface))
             ProxySource(c, p);
+        NativeTable(c);
         return c.ToString();
+    }
+
+    // The C++ functions C# calls on C++ objects of C# interfaces.
+    void NativeTable(Code c)
+    {
+        c.Line();
+        c.Open("namespace");
+        foreach (ProxyMember m in _m.NativeMembers)
+        {
+            ProxyType p = _m.Types.First(t => t.Methods.Contains(m));
+            var ps = new List<string> { "void* self" };
+            var args = new List<string>();
+            var prep = new List<string>();
+            foreach (ProxyParameter pa in m.Parameters)
+            {
+                string n = "p_" + pa.Name;
+                switch (pa.Type.Kind)
+                {
+                    case ManagedKind.Bool:
+                        ps.Add($"::helix::u8 {n}");
+                        args.Add($"{n} != 0");
+                        break;
+                    case ManagedKind.String:
+                        ps.Add($"const char16_t* {n}");
+                        ps.Add($"::helix::i32 {n}_n");
+                        prep.Add($"::helix::String {n}_s = ::helix::scripting::StringFromUtf16({n}, {n}_n);");
+                        args.Add($"{n}_s");
+                        break;
+                    default:
+                        ps.Add($"{CppValue(pa.Type)} {n}");
+                        args.Add(n);
+                        break;
+                }
+            }
+            string call = $"static_cast<{Q(p)}*>(self)->{m.Name}({string.Join(", ", args)})";
+            string? store = m.Return.Kind switch
+            {
+                ManagedKind.Void => null,
+                ManagedKind.Bool => $"*result = ({call}) ? 1 : 0;",
+                ManagedKind.String => $"*result = ::helix::scripting::PassString({call});",
+                _ => $"*result = {call};",
+            };
+            if (store != null)
+                ps.Add(m.Return.Kind switch
+                {
+                    ManagedKind.Bool => "::helix::u8* result",
+                    ManagedKind.String => "::helix::scripting::InteropString* result",
+                    _ => $"{CppValue(m.Return)}* result",
+                });
+            c.Open($"::helix::i32 {m.Thunk}({string.Join(", ", ps)})");
+            c.Line("if (!self)");
+            c.Line("    return ::helix::scripting::InteropMissingObject;");
+            foreach (string l in prep)
+                c.Line(l);
+            c.Line(store ?? call + ";");
+            c.Line("return ::helix::scripting::InteropOk;");
+            c.Close();
+        }
+        c.Open("const void* const kNative[] =");
+        foreach (ProxyMember m in _m.NativeMembers)
+            c.Line($"std::bit_cast<const void*>(&{m.Thunk}),");
+        c.Line("nullptr,");
+        c.Close("};");
+        c.Close();
+        c.Line();
+        c.Line("// The functions C# calls on C++ implementations of its interfaces.");
+        c.Open($"HX_BINDINGS_EXPORT const void* const* HxProxies_{ModuleIdent}_Native(::helix::u32* count)");
+        c.Line($"*count = {_m.NativeMembers.Count}u;");
+        c.Line("return kNative;");
+        c.Close();
     }
 
     void ProxySource(Code c, ProxyType p)
@@ -315,6 +422,14 @@ public sealed class ProxyGenerator
             Member(c, $"auto {s}::Get() const -> {CppValue(prop.Type)}", p, prop.Getter, owner);
             if (prop.Setter != null)
                 Member(c, $"auto {s}::operator=({CppIn(prop.Type)} {prop.Setter.Parameters[0].CppName}) -> {s}&", p, prop.Setter, owner, "*this");
+        }
+        foreach (ProxyEvent e in p.Events)
+        {
+            string s = $"{q}::HxEvent_{e.Name}";
+            string owner = e.Static ? null! :
+                $"reinterpret_cast<const {q}*>(reinterpret_cast<const char*>(this) - ::helix::scripting::OffsetOf(&{q}::{e.Name}))->handle_";
+            Member(c, $"auto {s}::Add({CallbackType(e.Delegate)} handler) const -> ::helix::u64", p, e.Add, owner);
+            Member(c, $"auto {s}::Remove(::helix::u64 token) const -> void", p, e.Remove, owner);
         }
     }
 
@@ -414,9 +529,41 @@ public sealed class ProxyGenerator
             ManagedKind.NativeStruct => (new() { $"{t.Cs}* {n}" }, new() { t.Cs + "*" }, $"*{n}"),
             ManagedKind.Array => (new() { $"{t.Element!.Cs}* {n}", $"int {n}_n" }, new() { t.Element!.Cs + "*", "int" },
                                   $"global::Helix.Interop.Native.ReadArray({n}, {n}_n)"),
+            ManagedKind.Interface => (new() { $"void* {n}" }, new() { "void*" }, $"hx_i_{pa.Name}"),
+            ManagedKind.Delegate => (new() { $"void* {n}", $"void* {n}_u" }, new() { "void*", "void*" }, $"hx_d_{pa.Name}"),
             _ => (new() { $"{t.Cs} {n}" }, new() { t.Cs }, n),
         };
     }
+
+    static string CsCallbackAbi(ManagedType t) => t.Kind == ManagedKind.Bool ? "byte" : t.Cs;
+
+    // The lines before a call that make the C# value of an interface or delegate argument (and after it, end it).
+    void CsPrepare(Code c, ProxyParameter pa, List<string> after)
+    {
+        string n = "a_" + pa.Name;
+        ManagedType t = pa.Type;
+        if (t.Kind == ManagedKind.Interface)
+        {
+            // Borrowed for the call: the C# object stops forwarding when the call returns.
+            c.Line($"var hx_i_{pa.Name} = {n} == null ? null : new HxNative_{Ident(t.Proxy!)}({n});");
+            after.Add($"hx_i_{pa.Name}?.Invalidate();");
+        }
+        else if (t.Kind == ManagedKind.Delegate)
+        {
+            var abi = t.Arguments.Select(CsCallbackAbi).ToList();
+            string result = t.Result!.Kind == ManagedKind.Void ? "void" : CsCallbackAbi(t.Result);
+            string fn = $"delegate* unmanaged[Cdecl]<global::System.IntPtr{string.Join("", abi.Select(x => ", " + x))}, {result}>";
+            var names = t.Arguments.Select((_, i) => $"x{i}").ToList();
+            var values = t.Arguments.Select((a, i) => a.Kind == ManagedKind.Bool ? $"(byte)(x{i} ? 1 : 0)" : $"x{i}").ToList();
+            string invoke = $"(({fn})hx_f_{pa.Name})(hx_u_{pa.Name}{string.Join("", values.Select(v => ", " + v))})";
+            if (t.Result.Kind == ManagedKind.Bool)
+                invoke += " != 0";
+            c.Line($"global::System.IntPtr hx_f_{pa.Name} = (global::System.IntPtr){n}, hx_u_{pa.Name} = (global::System.IntPtr){n}_u;");
+            c.Line($"{t.Cs} hx_d_{pa.Name} = {n} == null ? null : new {t.Cs}(({string.Join(", ", names)}) => {invoke});");
+        }
+    }
+
+    string Ident(ProxyType p) => p.FullName.Replace('.', '_');
 
     static string CsStore(ManagedType t, string value) => t.Kind switch
     {
@@ -471,6 +618,7 @@ public sealed class ProxyGenerator
                     abi.AddRange(a);
                     values.Add(v);
                 }
+                ProxyEvent? ev = p.Events.FirstOrDefault(x => x.Add == m || x.Remove == m);
                 bool hasResult = m.Return.Kind != ManagedKind.Void;
                 if (hasResult)
                 {
@@ -491,17 +639,45 @@ public sealed class ProxyGenerator
                     c.Line("    return 1;");
                     target = "hx_o";
                 }
-                string call = m.Kind switch
+                var after = new List<string>();
+                foreach (ProxyParameter pa in m.Parameters)
+                    CsPrepare(c, pa, after);
+                if (after.Count > 0)
+                    c.Open("try");
+                switch (m.Kind)
                 {
-                    ProxyMemberKind.Constructor => $"new {type}({string.Join(", ", values)})",
-                    ProxyMemberKind.Getter => $"{target}.{m.Name}",
-                    ProxyMemberKind.Setter => $"{target}.{m.Name} = {values[0]}",
-                    _ => $"{target}.{m.Name}({string.Join(", ", values)})",
-                };
-                if (hasResult)
-                    c.Line(CsStore(m.Return, call));
-                else
-                    c.Line(call + ";");
+                    case ProxyMemberKind.EventAdd:
+                        c.Line($"{target}.{m.Name} += {values[0]};");
+                        c.Line($"*result = global::Helix.Interop.Objects.NewHandle({values[0]});");
+                        break;
+                    case ProxyMemberKind.EventRemove:
+                        c.Line($"if (a_token == 0)");
+                        c.Line("    return 0;");
+                        c.Line($"var hx_h = {gch}.FromIntPtr((global::System.IntPtr)a_token);");
+                        c.Line($"{target}.{m.Name} -= ({ev!.Delegate.Cs})hx_h.Target;");
+                        c.Line("hx_h.Free();");
+                        break;
+                    default:
+                    {
+                        string call = m.Kind switch
+                        {
+                            ProxyMemberKind.Constructor => $"new {type}({string.Join(", ", values)})",
+                            ProxyMemberKind.Getter => $"{target}.{m.Name}",
+                            ProxyMemberKind.Setter => $"{target}.{m.Name} = {values[0]}",
+                            _ => $"{target}.{m.Name}({string.Join(", ", values)})",
+                        };
+                        c.Line(hasResult ? CsStore(m.Return, call) : call + ";");
+                        break;
+                    }
+                }
+                if (after.Count > 0)
+                {
+                    c.Close();
+                    c.Open("finally");
+                    foreach (string l in after)
+                        c.Line(l);
+                    c.Close();
+                }
                 c.Line("return 0;");
                 c.Close();
                 c.Open("catch (global::System.Exception hx_e)");
@@ -525,12 +701,105 @@ public sealed class ProxyGenerator
             c.Line($"table[{m.Index}] = (void*)({_fnTypes[m]})&{m.Thunk};");
         c.Line($"if (set(table, {count}u, Hash) == 0)");
         c.Line($"    throw new global::System.InvalidOperationException(\"{_m.Module}: the native proxies were made from another build\");");
+        c.Line($"var native = (delegate* unmanaged[Cdecl]<uint*, void**>)export(\"HxProxies_{ModuleIdent}_Native\");");
+        c.Line("uint nativeCount = 0;");
+        c.Line("void** nativeTable = native == null ? null : native(&nativeCount);");
+        c.Line($"if (nativeCount != {_m.NativeMembers.Count})");
+        c.Line($"    throw new global::System.InvalidOperationException(\"{_m.Module}: the native module has other interface functions\");");
+        foreach (ProxyMember m in _m.NativeMembers)
+            c.Line($"{m.Thunk} = ({NativeFnType(m)})nativeTable[{m.Index}];");
         c.Close();
+        foreach (ProxyMember m in _m.NativeMembers)
+            c.Line($"internal static {NativeFnType(m)} {m.Thunk};");
         c.Close();
+        foreach (ProxyType p in _m.Types.Where(t => t.IsInterface))
+            ForwardingClass(c, p);
         c.Close();
         return c.ToString();
     }
 
+    string NativeFnType(ProxyMember m)
+    {
+        var abi = new List<string> { "void*" };
+        foreach (ProxyParameter pa in m.Parameters)
+        {
+            if (pa.Type.Kind == ManagedKind.String)
+            {
+                abi.Add("char*");
+                abi.Add("int");
+            }
+            else
+                abi.Add(CsCallbackAbi(pa.Type));
+        }
+        if (m.Return.Kind == ManagedKind.String)
+            abi.Add("global::Helix.Interop.InteropString*");
+        else if (m.Return.Kind != ManagedKind.Void)
+            abi.Add(CsCallbackAbi(m.Return) + "*");
+        abi.Add("int");
+        return $"delegate* unmanaged[Cdecl]<{string.Join(", ", abi)}>";
+    }
+
+    // A C++ object of a C# interface, as C# sees it during the call it was handed to.
+    void ForwardingClass(Code c, ProxyType p)
+    {
+        string cls = $"HxNative_{Ident(p)}";
+        c.Line();
+        c.Line($"/// <summary>A C++ implementation of {p.FullName}, borrowed for the call it was handed to.</summary>");
+        c.Open($"internal sealed unsafe class {cls} : global::{p.FullName}");
+        c.Line("void* _self;");
+        c.Line($"public {cls}(void* self) => _self = self;");
+        c.Line("public void Invalidate() => _self = null;");
+        foreach (ProxyMember m in p.Methods)
+        {
+            string ps = string.Join(", ", m.Parameters.Select(pa => $"{pa.Type.Cs} {pa.Name}"));
+            c.Open($"public {m.Return.Cs} {m.Name}({ps})");
+            c.Line("if (_self == null)");
+            c.Line($"    throw new global::System.ObjectDisposedException(\"{p.FullName}\", \"a C++ object is borrowed for the call it was handed to\");");
+            var args = new List<string> { "_self" };
+            var fixeds = new List<string>();
+            foreach (ProxyParameter pa in m.Parameters)
+            {
+                if (pa.Type.Kind == ManagedKind.String)
+                {
+                    fixeds.Add($"fixed (char* hx_{pa.Name} = {pa.Name})");
+                    args.Add($"hx_{pa.Name}");
+                    args.Add($"{pa.Name} == null ? 0 : {pa.Name}.Length");
+                }
+                else if (pa.Type.Kind == ManagedKind.Bool)
+                    args.Add($"(byte)({pa.Name} ? 1 : 0)");
+                else
+                    args.Add(pa.Name);
+            }
+            string decl = m.Return.Kind switch
+            {
+                ManagedKind.Void => "",
+                ManagedKind.String => "global::Helix.Interop.InteropString hx_r;",
+                _ => $"{CsCallbackAbi(m.Return)} hx_r;",
+            };
+            if (decl.Length > 0)
+            {
+                c.Line(decl);
+                args.Add("&hx_r");
+            }
+            foreach (string f in fixeds)
+                c.Line(f);
+            c.Open();
+            c.Line($"int hx_s = HxProxies_{ModuleIdent}.{m.Thunk}({string.Join(", ", args)});");
+            c.Line("if (hx_s != 0)");
+            c.Line($"    global::Helix.Interop.Native.Fail(hx_s, \"{p.FullName}.{m.Name}\");");
+            c.Close();
+            if (m.Return.Kind == ManagedKind.String)
+                c.Line("return global::Helix.Interop.Native.ReadString((byte*)hx_r.data, hx_r.size);");
+            else if (m.Return.Kind == ManagedKind.Bool)
+                c.Line("return hx_r != 0;");
+            else if (decl.Length > 0)
+                c.Line("return hx_r;");
+            c.Close();
+        }
+        c.Close();
+    }
+
     ProxyType Owner(ProxyMember m) => _m.Types.First(p => p.Methods.Contains(m) || p.Constructors.Contains(m) ||
-                                                          p.Properties.Any(x => x.Getter == m || x.Setter == m));
+                                                          p.Properties.Any(x => x.Getter == m || x.Setter == m) ||
+                                                          p.Events.Any(x => x.Add == m || x.Remove == m));
 }

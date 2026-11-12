@@ -48,7 +48,7 @@ if(HELIX_BUILD_TESTS AND PROJECT_IS_TOP_LEVEL)
         target_include_directories(helix_bindgen_sample_shared PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/Tests")
         target_link_libraries(helix_bindgen_sample_shared PRIVATE Helix::Scripting)
         helix_apply_options(helix_bindgen_sample_shared)
-        helix_bindgen(helix_bindgen_sample_shared MODULE HelixBindgen.Scripts ASSEMBLY "${scripts_dll}" PROXIES Scripts.Counter
+        helix_bindgen(helix_bindgen_sample_shared MODULE HelixBindgen.Scripts ASSEMBLY "${scripts_dll}" PROXIES Scripts.Counter Scripts.IScorer
                       NAMESPACE Sample REFERENCES "${sample_dir}/Sample.h" INCLUDE_ROOTS "${CMAKE_CURRENT_SOURCE_DIR}/Tests" CS_OUTPUT exports_cs)
 
         add_custom_command(

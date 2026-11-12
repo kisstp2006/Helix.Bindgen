@@ -101,6 +101,7 @@ public sealed class CppGenerator
         _c.Line("using namespace ::helix::scripting;");
         _c.Line();
         WritePrivateAccess();
+        WriteBridge();
         foreach (Thunk th in _b.Thunks)
             WriteThunk(th);
         WriteTable();
@@ -160,6 +161,226 @@ public sealed class CppGenerator
         f.Static ? $"{Q(t)}::{f.Name}"
         : _privateTags.TryGetValue(f, out int k) ? $"({self}->*HxMember(HxTag{k}{{}}))"
         : $"{self}->{f.Name}";
+
+    // ------------------------------------------------------------------------------------------- the bridge
+
+    string Derived(TypeModel t) => $"HxDerived_{t.Ident}";
+
+    // C++ values handed to a C# function: the C ABI types and the expressions (the C# side reads them as the
+    // generated exports do).
+    (List<string> Abi, List<string> Args, List<string> Prep) ToManaged(List<(TypeRef Type, string Name)> values, Location where, string what)
+    {
+        var abi = new List<string>();
+        var args = new List<string>();
+        var prep = new List<string>();
+        foreach ((TypeRef a, string n) in values)
+        {
+            Mapping m = _b.Map.Map(a, where, what);
+            bool isPointer = a.Pointers > 0;
+            switch (m.Kind)
+            {
+                case MapKind.Primitive or MapKind.Enum:
+                    abi.Add(CType(m));
+                    args.Add(isPointer ? $"*{n}" : n);
+                    break;
+                case MapKind.Bool:
+                    abi.Add("u8");
+                    args.Add($"u8({n} ? 1 : 0)");
+                    break;
+                case MapKind.TypeId:
+                    abi.Add("u32");
+                    args.Add($"{n}.value");
+                    break;
+                case MapKind.Struct:
+                    abi.Add($"const {CType(m)}*");
+                    args.Add(isPointer ? n : $"&{n}");
+                    break;
+                case MapKind.String:
+                    abi.Add("const char*");
+                    abi.Add("i32");
+                    prep.Add($"StringView {n}_v = {n};");
+                    args.Add($"{n}_v.Data()");
+                    args.Add($"i32({n}_v.Size())");
+                    break;
+                case MapKind.Object:
+                    abi.Add("u64");
+                    abi.Add("u32");
+                    prep.Add($"InteropObject {n}_o = PassObject<{RootName(m)}>({(isPointer ? n : "&" + n)});");
+                    args.Add($"{n}_o.id");
+                    args.Add($"{n}_o.type");
+                    break;
+                case MapKind.Array:
+                {
+                    Mapping el = m.Element!;
+                    abi.Add(el.Kind == MapKind.Object ? "const InteropObject*" : $"const {CType(el)}*");
+                    abi.Add("i32");
+                    if (el.Kind == MapKind.Object)
+                    {
+                        prep.Add($"Array<InteropObject> {n}_ids;");
+                        prep.Add($"for (auto* o : {n})");
+                        prep.Add($"    {n}_ids.Push(PassObject<{RootName(el)}>(o));");
+                        args.Add($"{n}_ids.Data()");
+                        args.Add($"i32({n}_ids.Size())");
+                    }
+                    else
+                    {
+                        args.Add($"{n}.Data()");
+                        args.Add($"i32({n}.Size())");
+                    }
+                    break;
+                }
+                default:
+                    throw new BindgenException(where, $"{what}: {m.Cs} does not go to C#");
+            }
+        }
+        return (abi, args, prep);
+    }
+
+    // The C type a C# function's result is written to, and the C++ value made of it.
+    (string Decl, string Abi, string Value) FromManaged(TypeRef r, Location where, string what)
+    {
+        Mapping m = _b.Map.Map(r, where, what);
+        return m.Kind switch
+        {
+            MapKind.Void => ("", "", ""),
+            MapKind.Bool => ("u8 r = 0;", "u8*", "r != 0"),
+            MapKind.TypeId => ("u32 r = 0;", "u32*", "TypeId{r}"),
+            MapKind.Primitive or MapKind.Enum or MapKind.Struct when r.Pointers == 0 && !r.Reference => ($"{CType(m)} r{{}};", $"{CType(m)}*", "r"),
+            MapKind.String when !r.Name.EndsWith("StringView", StringComparison.Ordinal) && !r.Reference =>
+                ("InteropString16 r{};", "InteropString16*", "StringFromUtf16(r.data, r.size)"),
+            MapKind.Object when r.Pointers == 1 && !r.Reference => ("InteropObject r{};", "InteropObject*", $"ObjectFromId<{RootName(m)}, {Q(m.Bound!)}>(r.id)"),
+            _ => throw new BindgenException(where, $"{what}: a C# override or implementation answers {r.Spelling()}, which Bindgen does not bring back " +
+                                                   "(values, String, objects by pointer)"),
+        };
+    }
+
+    // The body of a C++ function that calls a C# function of the managed table with a GC handle; `fallback` is what
+    // it does when C# is not there or failed.
+    void ManagedCall(MethodModel m, string handle, int index, string what, string fallback)
+    {
+        var values = m.Parameters.Select((p, i) => (p.Type, $"a{i}")).ToList();
+        (List<string> abi, List<string> args, List<string> prep) = ToManaged(values, m.Where, what);
+        (string decl, string resultAbi, string value) = FromManaged(m.Return, m.Where, what);
+        _c.Open("if (!gHxManaged)");
+        _c.Line($"ReportBindingFailure(\"{what}\", InteropNotLoaded);");
+        _c.Line(fallback);
+        _c.Close();
+        foreach (string l in prep)
+            _c.Line(l);
+        if (decl.Length > 0)
+        {
+            _c.Line(decl);
+            abi.Add(resultAbi);
+            args.Add("&r");
+        }
+        _c.Line($"i32 status = HxManagedFn<i32 (*)(u64{string.Join("", abi.Select(x => ", " + x))})>({index})({handle}{string.Join("", args.Select(x => ", " + x))});");
+        _c.Open("if (status != 0)");
+        _c.Line($"ReportBindingFailure(\"{what}\", status);");
+        _c.Line(fallback);
+        _c.Close();
+        if (decl.Length > 0)
+            _c.Line($"return {value};");
+    }
+
+    string Signature(MethodModel m, string name) =>
+        $"{Spell(m.Return, m.Where, m.Name)} {name}({string.Join(", ", m.Parameters.Select((p, i) => $"{Spell(p.Type, m.Where, p.Name)} a{i}"))}){(m.Const ? " const" : "")}";
+
+    string ArgList(MethodModel m) => string.Join(", ", m.Parameters.Select((_, i) => $"a{i}"));
+
+    // The managed table, the adapters of interfaces and their casts, the C++ subclasses of classes C# derives from.
+    void WriteBridge()
+    {
+        _c.Line("void* const* gHxManaged = nullptr;");
+        _c.Line();
+        _c.Line("template <class F>");
+        _c.Line("F HxManagedFn(u32 index) { return std::bit_cast<F>(gHxManaged[index]); }");
+        _c.Line();
+        _c.Line("template <class T>");
+        _c.Line("T HxDefault() { return T(); }");
+        _c.Line();
+        foreach (TypeModel i in Own.Where(t => t.Kind == TypeKind.Interface))
+        {
+            string q = Q(i);
+            _c.Line($"// {i.Name} implemented by a C# object: its calls go to the C# object of the handle.");
+            _c.Open($"class HxAdapter_{i.Ident} final : public {q}");
+            _c.Line("public:", -1);
+            _c.Line($"explicit HxAdapter_{i.Ident}(u64 handle) : handle_(handle) {{}}");
+            foreach (ManagedEntry e in _b.Managed.Where(e => e.Kind == ExportKind.Interface && e.Owner == i))
+            {
+                MethodModel m = e.Method!;
+                _c.Open(Signature(m, m.Name) + " override");
+                ManagedCall(m, "handle_", e.Index, $"{i.Name}.{m.CsName}", $"return HxDefault<{Spell(m.Return.Bare(), m.Where, m.Name)}>();");
+                _c.Close();
+            }
+            _c.Line();
+            _c.Line("private:", -1);
+            _c.Line("u64 handle_;");
+            _c.Close("};");
+            _c.Line();
+            _c.Line($"// A native object as {i.Name}: through the class that implements it.");
+            _c.Open($"{q}* HxCastTo_{i.Ident}(u64 id, u32 type)");
+            foreach (TypeModel c in _b.ImplementersOf(i))
+            {
+                _c.Line($"if (IsAssignableFrom(TypeOf<{Q(c)}>(), TypeId{{type}}))");
+                _c.Line($"    return static_cast<{q}*>(ObjectFromId<{Q(_b.RootOf(c))}, {Q(c)}>(id));");
+            }
+            _c.Line("(void)id;");
+            _c.Line("(void)type;");
+            _c.Line("return nullptr;");
+            _c.Close();
+            _c.Line();
+            _c.Line($"// A Variant of an object (held by its root's address) as {i.Name}.");
+            _c.Open($"{q}* HxInterfaceOf_{i.Ident}(const Variant& value)");
+            TypeModel? root = _b.ImplementersOf(i).Select(c => _b.RootOf(c)).FirstOrDefault();
+            if (root != null)
+            {
+                _c.Line($"auto* o = static_cast<{Q(root)}*>(value.AsObject());");
+                _c.Line($"return o ? HxCastTo_{i.Ident}(ObjectHandles<{Q(root)}>::ToId(o), value.Type().value) : nullptr;");
+            }
+            else
+            {
+                _c.Line("(void)value;");
+                _c.Line("return nullptr;");
+            }
+            _c.Close();
+            _c.Line();
+        }
+        foreach ((TypeModel t, List<Overridable> virtuals) in _b.Overridables)
+        {
+            string q = Q(t);
+            string root = Q(_b.RootOf(t));
+            _c.Line($"// {t.Name} of a C# class: its virtual functions call the C# overrides the class has (hxMask).");
+            _c.Open($"class {Derived(t)} final : public {q}");
+            _c.Line("public:", -1);
+            _c.Line($"using {q}::{t.Name};");
+            _c.Line("u64 hxMask = 0;");
+            foreach (Overridable o in virtuals)
+            {
+                MethodModel m = o.Nearest;
+                string ret = Spell(m.Return, m.Where, m.Name);
+                string baseCall = o.Pure ? $"return HxDefault<{Spell(m.Return.Bare(), m.Where, m.Name)}>();" : $"return {Q(o.NearestOwner)}::{m.Name}({ArgList(m)});";
+                _c.Line();
+                _c.Open(Signature(m, m.Name) + " override");
+                _c.Line($"if (!(hxMask & (u64(1) << {o.Bit})))");
+                _c.Line($"    {baseCall}");
+                _c.Line($"u64 handle = ObjectHandles<{root}>::WrapperOf(const_cast<{Derived(t)}*>(this));");
+                ManagedCall(m, "handle", o.Export.Index, $"{t.Name}.{m.CsName}", baseCall);
+                _c.Close();
+                _c.Open(Signature(m, "HxBase_" + m.Name));
+                if (o.Pure)
+                {
+                    _c.Line($"ReportBindingFailure(\"{t.Name}.{m.CsName}: abstract in C++\", InteropMissingObject);");
+                    _c.Line(baseCall);
+                }
+                else
+                    _c.Line(baseCall);
+                _c.Close();
+                _ = ret;
+            }
+            _c.Close("};");
+            _c.Line();
+        }
+    }
 
     // ------------------------------------------------------------------------------------------- thunks
 
@@ -229,6 +450,26 @@ public sealed class CppGenerator
                 else
                     call.Args.Add($"{n}_o");
                 break;
+            case MapKind.Interface:
+            {
+                // A native object implementing it (its id and type), or a C# object (its GC handle) through an adapter
+                // that lives for the call.
+                string i = Q(m.Bound!);
+                call.Params.Add($"u64 {n}");
+                call.Params.Add($"u32 {n}_t");
+                call.Params.Add($"u64 {n}_h");
+                call.Prep.Add($"HxAdapter_{m.Bound!.Ident} {n}_a({n}_h);");
+                call.Prep.Add($"{i}* {n}_i = {n} ? HxCastTo_{m.Bound!.Ident}({n}, {n}_t) : ({n}_h ? static_cast<{i}*>(&{n}_a) : nullptr);");
+                if (declared.Reference)
+                {
+                    call.Prep.Add($"if (!{n}_i)");
+                    call.Prep.Add("    return InteropNullArgument;");
+                    call.Args.Add($"*{n}_i");
+                }
+                else
+                    call.Args.Add($"{n}_i");
+                break;
+            }
             case MapKind.Array:
             {
                 Mapping e = m.Element!;
@@ -341,12 +582,57 @@ public sealed class CppGenerator
                 body = new() { $"{Access(t, th.Field!, "self_o")} = {value.Args[0]};" };
                 break;
             }
+            case ThunkKind.GetWrapper:
+                call.Params.Add("u64* result");
+                body = new() { $"*result = ObjectHandles<{Q(t)}>::WrapperOf(self_o);" };
+                break;
+            case ThunkKind.SetWrapper:
+                call.Params.Add("u64 handle");
+                body = new()
+                {
+                    $"u64& slot = ObjectHandles<{Q(t)}>::WrapperOf(self_o);",
+                    "if (slot != handle)",
+                    "{",
+                    "    ReleaseWrapper(slot);",
+                    "    slot = handle;",
+                    "}",
+                };
+                break;
+            case ThunkKind.Alive:
+                // No object is no error here: the answer is that it is not alive.
+                _c.Open($"i32 {th.Name}(u64 self, u8* result)");
+                _c.Line($"*result = ObjectHandles<{Q(t)}>::FromId(self) ? 1 : 0;");
+                _c.Line("return InteropOk;");
+                _c.Close();
+                _c.Line();
+                return;
+            case ThunkKind.NewDerived:
+            {
+                MethodModel mm = th.Method!;
+                foreach (ParameterModel p in mm.Parameters)
+                    In(call, _b.Map.Map(p.Type, mm.Where, $"{t.Name}({p.Name})"), "p_" + p.Name, p.Type);
+                call.Params.Add("u64 hxHandle");
+                call.Params.Add("u64 hxMask");
+                call.Params.Add("InteropObject* result");
+                body = new()
+                {
+                    $"auto* o = new {Derived(t)}({string.Join(", ", call.Args)});",
+                    "o->hxMask = hxMask;",
+                    $"ObjectHandles<{Q(_b.RootOf(t))}>::WrapperOf(o) = hxHandle;",
+                    $"*result = PassObject<{Q(_b.RootOf(t))}>(o);",
+                };
+                break;
+            }
             case ThunkKind.Method:
+            case ThunkKind.BaseCall:
             {
                 MethodModel mm = th.Method!;
                 foreach (ParameterModel p in mm.Parameters)
                     In(call, _b.Map.Map(p.Type, mm.Where, $"{t.Name}.{mm.Name}({p.Name})"), "p_" + p.Name, p.Type);
-                string expr = $"{target}{mm.Name}({string.Join(", ", call.Args)})";
+                string args = string.Join(", ", call.Args);
+                string expr = th.Kind == ThunkKind.BaseCall ? $"static_cast<{Derived(t)}*>(self_o)->HxBase_{mm.Name}({args})"
+                              : mm.RealConstructor ? $"new {Q(t)}({args})"
+                              : $"{target}{mm.Name}({args})";
                 if (th.Type.Kind == MapKind.Void)
                     body = new() { expr + ";" };
                 else
@@ -548,6 +834,16 @@ public sealed class CppGenerator
         _c.Line("return true;");
         _c.Close();
         _c.Line();
+        _c.Line("// The C# side's functions (the handle release, overrides of virtual functions, implementations of interfaces).");
+        _c.Open($"HX_BINDINGS_EXPORT bool HxBindings_{ModuleIdent}_SetManaged(void* const* table, ::helix::u32 count, ::helix::u64 hash)");
+        _c.Line($"if (count != {_b.Managed.Count}u || hash != 0x{_b.Hash:x16}ull)");
+        _c.Line("    return false;");
+        _c.Line("gHxManaged = table;");
+        _c.Line("::helix::scripting::SetManagedHandleRelease(std::bit_cast<void (*)(::helix::u64)>(table[0]));");
+        _c.Line($"::helix::scripting::RegisterManagedFunctions(\"{_b.Module.Name}\", table, count);");
+        _c.Line("return true;");
+        _c.Close();
+        _c.Line();
         _c.Line("// The function table and the hash of its shape (the C# side checks both).");
         _c.Open($"HX_BINDINGS_EXPORT const void* const* HxBindings_{ModuleIdent}_Functions(::helix::u32* count, ::helix::u64* hash)");
         _c.Line($"*count = {_b.Thunks.Count}u;");
@@ -614,7 +910,9 @@ public sealed class CppGenerator
                 mf.Add("u32(MemberVirtual)");
             if (mm.Tag.Has("Constructor"))
                 mf.Add("u32(MemberConstructor)");
-            _c.Line($"b.Method(\"{mm.CsName}\", {TypeExpr(r)}, {list},");
+            if (mm.RealConstructor && _b.IsAbstractCpp(t))
+                continue;
+            _c.Line($"b.Method(\"{(mm.RealConstructor ? ".ctor" : mm.CsName)}\", {TypeExpr(r)}, {list},");
             _c.Line($"         {Invoker(t, mm)}, nullptr, {string.Join(" | ", mf)});");
         }
         foreach (EventModel e in t.Events)
@@ -690,6 +988,19 @@ public sealed class CppGenerator
             ParameterModel p = mm.Parameters[i];
             Mapping pm = _b.Map.Map(p.Type, mm.Where, p.Name);
             string n = $"a{i}";
+            if (pm.Kind == MapKind.Interface)
+            {
+                // The object is held by its root's address; the interface is found through the implementing classes.
+                lines.Add($"{Q(pm.Bound!)}* {n} = HxInterfaceOf_{pm.Bound!.Ident}(args[{i}]);");
+                if (p.Type.Reference)
+                {
+                    lines.Add($"if (!{n}) {{ error = \"{t.Name}.{mm.Name}: {p.Name} is null\"; return false; }}");
+                    args.Add($"*{n}");
+                }
+                else
+                    args.Add(n);
+                continue;
+            }
             lines.Add($"{CType(pm)} {n}{{}};");
             lines.Add($"if (!FromVariant(args[{i}], {n})) {{ error = \"{t.Name}.{mm.Name}: the argument {p.Name}\"; return false; }}");
             if (pm.Kind == MapKind.Object && p.Type.Reference && p.Type.Pointers == 0)
@@ -702,7 +1013,8 @@ public sealed class CppGenerator
             else
                 args.Add(n);
         }
-        string call = (isStatic ? $"{Q(t)}::" : "self_o->") + $"{mm.Name}({string.Join(", ", args)})";
+        string call = mm.RealConstructor ? $"new {Q(t)}({string.Join(", ", args)})"
+                      : (isStatic ? $"{Q(t)}::" : "self_o->") + $"{mm.Name}({string.Join(", ", args)})";
         if (r.Kind == MapKind.Void)
             lines.Add(call + ";");
         else

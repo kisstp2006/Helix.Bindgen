@@ -72,10 +72,36 @@ namespace Scripts
         // Members a proxy cannot have (listed by Bindgen, not generated).
         public object Anything() => null;
         public T Generic<T>() => default;
-        public event Action Changed
+        // Events and delegates C++ gives handlers and functions to.
+        public event Action<int> Changed;
+        public static event Action Reset;
+        public int Increment(int amount)
         {
-            add { }
-            remove { }
+            value += amount;
+            Changed?.Invoke(value);
+            return value;
         }
+        public static void FireReset() => Reset?.Invoke();
+        public int Apply(Func<int, int> f, int v) => f(v);
+        public void Each(Action<int, bool> f)
+        {
+            for (int i = 0; i < 3; i++)
+                f(i, i % 2 == 0);
+        }
+
+        // C++ implementations of a C# interface, borrowed for the call.
+        public int UseScorer(IScorer scorer, int v) => scorer.Accepts('x') ? scorer.Score(v) : -1;
+        public string Describe(IScorer scorer) => scorer.Label("score: ") + scorer.Score(2);
+        IScorer _kept;
+        public void Keep(IScorer scorer) => _kept = scorer;
+        public int UseKept() => _kept.Score(1);
+    }
+
+    // A C# interface C++ implements.
+    public interface IScorer
+    {
+        int Score(int value);
+        string Label(string prefix);
+        bool Accepts(char c);
     }
 }

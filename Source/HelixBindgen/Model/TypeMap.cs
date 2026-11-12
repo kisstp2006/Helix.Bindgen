@@ -12,6 +12,8 @@ public enum MapKind
     Object,
     Array,
     TypeId,
+    // A C++ interface (HX_INTERFACE): a native object that implements it, or a C# object through an adapter.
+    Interface,
 }
 
 /// <summary>What a C++ type is on both sides: its kind, its C# type, and for arrays the element's mapping.</summary>
@@ -167,6 +169,12 @@ public sealed class TypeMap
                 if (type.Pointers > 1)
                     throw new BindgenException(where, $"{what}: a pointer to a pointer");
                 m.ByRef |= type.Pointers == 1 && !type.Const;
+                return m;
+            case TypeKind.Interface:
+                if (!((type.Pointers == 1 && !type.Reference) || (type.Pointers == 0 && type.Reference)))
+                    throw new BindgenException(where, $"{what}: an interface {bound.Name} crosses as a pointer or a reference");
+                m.Kind = MapKind.Interface;
+                m.ByRef = false;
                 return m;
             default:
                 if (type.Pointers == 0 && !type.Reference)

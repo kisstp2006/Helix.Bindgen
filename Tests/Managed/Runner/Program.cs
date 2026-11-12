@@ -53,6 +53,9 @@ namespace Helix.Bindgen.Tests
             Statics();
             Timings();
             Destroyed();
+            Identity();
+            Derived();
+            Interfaces();
             Proxies(export);
 
             Console.WriteLine($"{s_checks - s_failures} of {s_checks} checks passed");
@@ -239,9 +242,92 @@ namespace Helix.Bindgen.Tests
             int failures = run();
             Native.ReportException = report;
             Check(failures == 0, $"the C++ checks of the proxies ({failures} failed)");
-            Check(reported == 1, "the exception C++ caused in C# is reported on the C# side");
+            Check(reported == 2, "the exceptions C++ caused in C# (a throw, a borrowed object used later) are reported on the C# side");
             Check(Scripts.Counter.Instances == instances + 2 && Scripts.Counter.Rate == 4.0f, "C++ changed C# state");
             Check(Thing.Count() == 0, "the native object C# made for C++ is gone");
+        }
+
+        // One wrapper per native object, and the reference's null semantics for destroyed ones.
+        static void Identity()
+        {
+            var m = new Mover("identity");
+            Check(ReferenceEquals(Thing.Find("identity"), m), "the constructor's wrapper is the one native code hands back");
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            Check(ReferenceEquals(Thing.Find("identity"), m), "and stays it across collections while it is held");
+            WeakReference weak = WrapAndForget();
+            for (int i = 0; i < 3 && weak.IsAlive; i++)
+            {
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+            }
+            Thing again = Thing.Find("found");
+            Check(again != null && again.name == "found", "a wrapper collected while its object lives is made again");
+            Thing same = Thing.Find("found");
+            Check(ReferenceEquals(again, same) && again.Equals(same) && again.GetHashCode() == same.GetHashCode(), "one wrapper per object");
+
+            Thing other = m;
+            Check(m == other && !(m != other) && m && m != null && m != again, "live objects compare by their native object");
+            m.Destroy();
+            Check(m == null && null == m && !m && m.Equals(null) && !(m is null) && m == other, "a destroyed object is null for ==, bool and Equals");
+            Throws<NullReferenceException>(() => _ = m.name, "members of a destroyed object throw");
+            again.Destroy();
+            Check(Thing.Count() == 0, "the identity objects are gone");
+        }
+
+        static WeakReference WrapAndForget()
+        {
+            new Mover("found");
+            // Only native code holds the object now; its wrapper is weak.
+            return new WeakReference(Thing.Find("found"));
+        }
+
+        // C# classes deriving from C++ classes.
+        static void Derived()
+        {
+            MakeRunner();
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            // Native code keeps the C# object of a derived class alive, with its state.
+            var r = Thing.Find("runner") as Scripts.Runner;
+            Check(r != null && r.hits == 5 && r.health == 95, "the C# object of a derived class lives with its native object");
+            Check(Thing.TotalWeight() == 21, "C++ calls the C# override, which calls the C++ base");
+            Check(Thing.GreetAll("ann") == "yo ann;", "an override with a string argument and result");
+            Check(r.Weight() == 21 && r.Greeting("bo") == "yo bo", "C# calls of the overrides");
+            var plain = new Scripts.Plain();
+            Check(Thing.TotalWeight() == 31 && plain.Weight() == 10 && plain.Greeting("x") == "hi x", "without overrides C++ calls stay in C++");
+            Mover.Hurt(r, 3);
+            Check(r.log == "D3" && r.health == 92, "C++ calls an interface function of the C# object, its base reaches C++");
+
+            Throws<InvalidOperationException>(() => new Shape("abstract"), "a class abstract in C++ is not made itself");
+            var circle = new Scripts.Circle("circle", 2);
+            Check(Shape.TotalArea() == 12 && ReferenceEquals(Thing.Find("circle"), circle), "C++ calls the C# implementation of a pure virtual function");
+
+            r.Destroy();
+            Check(r == null && r.hits == 5, "a destroyed derived object is null, its C# state still readable");
+            plain.Destroy();
+            circle.Destroy();
+            Check(Thing.Count() == 0, "the derived objects are gone");
+        }
+
+        static void MakeRunner()
+        {
+            var r = new Scripts.Runner("runner");
+            r.TakeHit(5);
+        }
+
+        // A C++ interface implemented by a native object and by a C# object.
+        static void Interfaces()
+        {
+            var shield = new Scripts.Shield();
+            Mover.Hurt(shield, 4);
+            Check(shield.absorbed == 4, "C++ calls a C# implementation of its interface");
+            Check(Mover.HurtIfAny(shield, 2) && shield.absorbed == 6 && !Mover.HurtIfAny(null, 1), "an interface by pointer, and null");
+            Throws<ArgumentNullException>(() => Mover.Hurt(null, 1), "null for an interface by reference");
+            var m = new Mover("armored");
+            Mover.Hurt(m, 30);
+            Check(m.health == 70, "a native object as its interface");
+            m.Destroy();
         }
 
         static void Destroyed()

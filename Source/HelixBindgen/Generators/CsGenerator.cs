@@ -141,7 +141,10 @@ public sealed class CsGenerator
             if (isRoot)
             {
                 _c.Line("internal ulong m_HxId;");
+                _c.Line("// An object of a C# class deriving from a generated one: base calls reach the C++ implementation.");
+                _c.Line("internal bool m_HxDerived;");
                 _c.Line("internal " + t.Name + "(global::Helix.Interop.ObjectId id) { m_HxId = id.Value; }");
+                WriteRootEquality(t);
             }
             else
                 _c.Line("internal " + t.Name + "(global::Helix.Interop.ObjectId id) : base(id) { }");
@@ -151,9 +154,53 @@ public sealed class CsGenerator
         }
         foreach (Thunk th in _b.Thunks.Where(x => x.Owner == t))
             WriteMember(t, th);
+        WriteInheritedOverrides(t);
+        // The constructors of a class abstract in C++: only C# subclasses are made.
+        if (_b.IsAbstractCpp(t))
+            foreach (MethodModel m in t.Methods.Where(m => m.RealConstructor && !m.Tag.Has("Hidden")))
+                WriteConstructor(t, null, m, string.Join(", ", m.Parameters.Select(p => ParamDecl(m, p))), $"{t.Name}.{t.Name}");
         foreach (TypeModel n in Nested(t))
             WriteType(n);
         _c.Close();
+    }
+
+    // The reference's Object semantics: a destroyed object compares equal to null, two live ones by their native
+    // object; `is null` sees only the C# reference.
+    void WriteRootEquality(TypeModel t)
+    {
+        Thunk alive = _b.Thunks.First(x => x.Owner == t && x.Kind == ThunkKind.Alive);
+        _fnTypes[alive] = "delegate* unmanaged[Cdecl, SuppressGCTransition]<ulong, byte*, int>";
+        Thunk get = _b.Thunks.First(x => x.Owner == t && x.Kind == ThunkKind.GetWrapper);
+        _fnTypes[get] = "delegate* unmanaged[Cdecl]<ulong, ulong*, int>";
+        Thunk set = _b.Thunks.First(x => x.Owner == t && x.Kind == ThunkKind.SetWrapper);
+        _fnTypes[set] = "delegate* unmanaged[Cdecl]<ulong, ulong, int>";
+        string n = t.Name;
+        _c.Line();
+        _c.Open("internal static bool HxAlive(ulong id)");
+        _c.Line("if (id == 0)");
+        _c.Line("    return false;");
+        _c.Line("byte alive;");
+        _c.Line($"return {ModuleClass}.{alive.Name}(id, &alive) == 0 && alive != 0;");
+        _c.Close();
+        _c.Open($"static bool HxCompare({n} x, {n} y)");
+        _c.Line("bool xNull = x is null, yNull = y is null;");
+        _c.Line("if (xNull && yNull)");
+        _c.Line("    return true;");
+        _c.Line("if (yNull)");
+        _c.Line("    return !HxAlive(x.m_HxId);");
+        _c.Line("if (xNull)");
+        _c.Line("    return !HxAlive(y.m_HxId);");
+        _c.Line("return x.m_HxId == y.m_HxId;");
+        _c.Close();
+        _c.Line($"public static bool operator ==({n} x, {n} y) => HxCompare(x, y);");
+        _c.Line($"public static bool operator !=({n} x, {n} y) => !HxCompare(x, y);");
+        _c.Line($"public static implicit operator bool({n} exists) => !HxCompare(exists, null);");
+        _c.Open("public override bool Equals(object other)");
+        _c.Line($"if (other is not null && other is not {n})");
+        _c.Line("    return false;");
+        _c.Line($"return HxCompare(this, ({n})other);");
+        _c.Close();
+        _c.Line("public override int GetHashCode() => m_HxId.GetHashCode();");
     }
 
     string Inherits(TypeModel t)
@@ -177,6 +224,8 @@ public sealed class CsGenerator
         public readonly List<string> Pre = new();
         public readonly List<string> Fixed = new();
         public readonly List<string> Post = new();
+        // Right after the call, before its status is looked at (GC handles made for the call).
+        public readonly List<string> Cleanup = new();
     }
 
     bool IsOut(MethodModel m, ParameterModel p) =>
@@ -264,11 +313,24 @@ public sealed class CsGenerator
                 call.Abi.Add("char*");
                 call.Abi.Add("int");
                 call.Args.Add(local);
-                call.Args.Add($"{n} == null ? 0 : {n}.Length");
+                call.Args.Add($"{n} is null ? 0 : {n}.Length");
                 break;
             case MapKind.Object:
                 call.Abi.Add("ulong");
-                call.Args.Add($"{n} == null ? 0ul : (({Root(m)}){n}).m_HxId");
+                call.Args.Add($"{n} is null ? 0ul : (({Root(m)}){n}).m_HxId");
+                break;
+            case MapKind.Interface:
+                // A native wrapper crosses as its object; any other C# object as a GC handle for the call.
+                call.Pre.Add($"global::Helix.Interop.InteropObject {local}_o = global::Helix.Interop.Objects.Pass({n});");
+                call.Pre.Add($"var {local}_g = {n} is not null && {local}_o.id == 0 ? global::System.Runtime.InteropServices.GCHandle.Alloc({n}) : default;");
+                call.Abi.Add("ulong");
+                call.Abi.Add("uint");
+                call.Abi.Add("ulong");
+                call.Args.Add($"{local}_o.id");
+                call.Args.Add($"{local}_o.type");
+                call.Args.Add($"{local}_g.IsAllocated ? (ulong)global::System.Runtime.InteropServices.GCHandle.ToIntPtr({local}_g) : 0ul");
+                call.Cleanup.Add($"if ({local}_g.IsAllocated)");
+                call.Cleanup.Add($"    {local}_g.Free();");
                 break;
             case MapKind.Array:
             {
@@ -341,6 +403,8 @@ public sealed class CsGenerator
             _c.Line(f);
         _c.Open();
         _c.Line($"int hx_s = {ModuleClass}.{th.Name}({string.Join(", ", args)});");
+        foreach (string l in call.Cleanup)
+            _c.Line(l);
         _c.Line("if (hx_s != 0)");
         _c.Line($"    global::Helix.Interop.Native.Fail(hx_s, \"{what}\");");
         _c.Close();
@@ -408,6 +472,11 @@ public sealed class CsGenerator
                 WriteEvent(t, th);
                 return;
             case ThunkKind.EventRemove:
+            case ThunkKind.GetWrapper:
+            case ThunkKind.SetWrapper:
+            case ThunkKind.Alive:
+            case ThunkKind.NewDerived:
+            case ThunkKind.BaseCall:
                 return;
         }
     }
@@ -430,17 +499,35 @@ public sealed class CsGenerator
         {
             if (th.Type.Kind != MapKind.Object || th.Type.Bound != t)
                 throw new BindgenException(m.Where, $"{what}: a Constructor returns a {t.Name}*");
-            _c.Open($"public {t.Name}({ps})");
-            Body(th, call, th.Type, what, false);
-            _c.Line("m_HxId = hx_r.id;");
-            _c.Line("global::Helix.Interop.Objects.Adopt(this, hx_r.id);");
-            _c.Close();
+            WriteConstructor(t, th, m, ps, what);
             return;
         }
         string st = th.Static ? "static " : "";
-        _c.Open($"public {st}{CsType(th.Type)} {Id(m.CsName)}({ps})");
-        Body(th, call, th.Type, what, true);
-        _c.Close();
+        if (m.Virtual && !th.Static)
+        {
+            bool first = _b.IsFirstDeclaration(t, m);
+            _c.Open($"public {(first ? "virtual" : "override")} {CsType(th.Type)} {Id(m.CsName)}({ps})");
+            if (_b.Overridables.ContainsKey(t))
+            {
+                // An object of a C# class deriving from this one: base calls reach the C++ implementation.
+                Thunk baseCall = _b.Thunks.First(x => x.Owner == t && x.Kind == ThunkKind.BaseCall && Binding.Key(x.Method!) == Binding.Key(m));
+                _c.Open("if (m_HxDerived)");
+                Body(baseCall, NewCall(m), th.Type, what, true);
+                _c.Close();
+                _c.Open("else");
+                Body(th, call, th.Type, what, true);
+                _c.Close();
+            }
+            else
+                Body(th, call, th.Type, what, true);
+            _c.Close();
+        }
+        else
+        {
+            _c.Open($"public {st}{CsType(th.Type)} {Id(m.CsName)}({ps})");
+            Body(th, call, th.Type, what, true);
+            _c.Close();
+        }
         if (m.Tag.Has("Lists") && th.Type.Kind == MapKind.Array)
         {
             string args = string.Join(", ", m.Parameters.Select(p => Pass(m, p)));
@@ -455,6 +542,83 @@ public sealed class CsGenerator
         string? generic = m.Tag.Get("Generic");
         if (generic != null)
             WriteGeneric(m, th, generic, st);
+    }
+
+    Call NewCall(MethodModel m)
+    {
+        var call = new Call();
+        for (int i = 0; i < m.Parameters.Count; i++)
+        {
+            ParameterModel p = m.Parameters[i];
+            In(call, _b.Map.Map(p.Type, m.Where, p.Name), Id(p.Name), $"hx_b{i}", IsOut(m, p));
+        }
+        return call;
+    }
+
+    // A constructor: of the generated class itself (the native object made by the C++ constructor or factory, its
+    // wrapper attached), or of a C# class deriving from it (the C++ subclass made with the C# object's strong handle
+    // and the mask of the virtual functions the C# class overrides).
+    void WriteConstructor(TypeModel t, Thunk? th, MethodModel m, string ps, string what)
+    {
+        string g = G(t);
+        _c.Open($"public {t.Name}({ps})");
+        _c.Open($"if (GetType() == typeof({g}))");
+        if (m.RealConstructor && _b.IsAbstractCpp(t))
+            _c.Line($"throw new global::System.InvalidOperationException(\"{t.Name} is abstract in C++: derive a C# class from it\");");
+        else
+        {
+            Body(th!, NewCall(m), th!.Type, what, false);
+            _c.Line("m_HxId = hx_r.id;");
+            _c.Line($"global::Helix.Interop.Objects.Attach(this, hx_r.id, typeof({g}));");
+            _c.Line("return;");
+        }
+        _c.Close();
+        Thunk? derived = _b.Thunks.FirstOrDefault(x => x.Owner == t && x.Kind == ThunkKind.NewDerived && x.Method == m);
+        if (derived == null)
+        {
+            _c.Line($"throw new global::System.NotSupportedException(\"{t.Name} has no C++ constructor a C# class can derive through\");");
+            _c.Close();
+            return;
+        }
+        Call call = NewCall(m);
+        call.Abi.Add("ulong");
+        call.Abi.Add("ulong");
+        call.Pre.Add("var hx_self = global::System.Runtime.InteropServices.GCHandle.Alloc(this);");
+        call.Args.Add("(ulong)global::System.Runtime.InteropServices.GCHandle.ToIntPtr(hx_self)");
+        call.Args.Add($"{ModuleClass}.HxMask_{t.Ident}(GetType())");
+        call.Cleanup.Add("if (hx_s != 0)");
+        call.Cleanup.Add("    hx_self.Free();");
+        _c.Open();
+        Body(derived, call, derived.Type, what, false);
+        _c.Line("m_HxId = hx_r.id;");
+        _c.Line("m_HxDerived = true;");
+        _c.Line("global::Helix.Interop.Objects.Remember(this, hx_r.id);");
+        _c.Close();
+        _c.Close();
+    }
+
+    // The virtual functions a derivable class inherits without declaring them: overrides that send the base calls
+    // of C# subclasses to the C++ implementation.
+    void WriteInheritedOverrides(TypeModel t)
+    {
+        if (!_b.Overridables.TryGetValue(t, out List<Overridable>? virtuals))
+            return;
+        foreach (Overridable o in virtuals.Where(o => o.NearestOwner != t))
+        {
+            MethodModel m = o.Nearest;
+            Thunk baseCall = _b.Thunks.First(x => x.Owner == t && x.Kind == ThunkKind.BaseCall && x.Virtual == o);
+            Mapping r = baseCall.Type;
+            string ps = string.Join(", ", m.Parameters.Select(p => ParamDecl(m, p)));
+            _c.Open($"public override {CsType(r)} {Id(m.CsName)}({ps})");
+            _c.Open("if (m_HxDerived)");
+            Body(baseCall, NewCall(m), r, $"{t.Name}.{m.CsName}", true);
+            _c.Close();
+            _c.Open("else");
+            string args = string.Join(", ", m.Parameters.Select(p => Pass(m, p)));
+            _c.Line(r.Kind == MapKind.Void ? $"base.{Id(m.CsName)}({args});" : $"return base.{Id(m.CsName)}({args});");
+            _c.Close();
+            _c.Close();
+        }
     }
 
     string Pass(MethodModel m, ParameterModel p)
@@ -552,12 +716,17 @@ public sealed class CsGenerator
         public readonly List<string> Types = new();
     }
 
-    EventAbi EventSignature(TypeModel t, EventModel e)
+    EventAbi EventSignature(TypeModel t, EventModel e) => Signature(e.Arguments, e.Where, $"{t.Name}.{e.CsName}");
+
+    // The C# side of C++ values handed to a C# function (as CppGenerator.ToManaged hands them).
+    EventAbi Signature(List<TypeRef> types, Location where, string what)
     {
         var a = new EventAbi();
-        for (int i = 0; i < e.Arguments.Count; i++)
+        for (int i = 0; i < types.Count; i++)
         {
-            Mapping m = _b.Map.Map(e.Arguments[i], e.Where, $"{t.Name}.{e.CsName}");
+            Mapping m = _b.Map.Map(types[i], where, what);
+            if (m.ByRef)
+                throw new BindgenException(where, $"{what}: a C# override or implementation takes no ref or out arguments");
             string n = $"a{i}";
             a.Types.Add(CsType(m));
             switch (m.Kind)
@@ -691,6 +860,97 @@ public sealed class CsGenerator
 
     // ------------------------------------------------------------------------------------------- the loader
 
+    readonly Dictionary<ManagedEntry, string> _exportTypes = new();
+
+    // The C# functions native code calls: the C# virtual functions (dispatching to the overrides of C# classes) and
+    // the C# implementations of the module's interfaces.
+    void WriteExports()
+    {
+        const string gch = "global::System.Runtime.InteropServices.GCHandle";
+        foreach (ManagedEntry e in _b.Managed.Where(e => e.Kind != ExportKind.Release))
+        {
+            MethodModel m = e.Method!;
+            string what = $"{e.Owner!.Name}.{m.CsName}";
+            EventAbi a = Signature(m.Parameters.Select(p => p.Type).ToList(), m.Where, what);
+            Mapping r = _b.Map.Map(m.Return, m.Where, what);
+            var ps = new List<string> { "ulong handle" };
+            ps.AddRange(a.Params);
+            var abi = new List<string> { "ulong" };
+            abi.AddRange(a.Abi);
+            string? resultType = r.Kind switch
+            {
+                MapKind.Void => null,
+                MapKind.Bool => "byte*",
+                MapKind.TypeId => "uint*",
+                MapKind.String => "global::Helix.Interop.InteropString16*",
+                MapKind.Object => "global::Helix.Interop.InteropObject*",
+                _ => CsType(r) + "*",
+            };
+            if (resultType != null)
+            {
+                ps.Add($"{resultType} result");
+                abi.Add(resultType);
+            }
+            abi.Add("int");
+            _exportTypes[e] = $"delegate* unmanaged[Cdecl]<{string.Join(", ", abi)}>";
+            string call = $"hx_o.{Id(m.CsName)}({string.Join(", ", a.Values)})";
+            _c.Line("[global::System.Runtime.InteropServices.UnmanagedCallersOnly(CallConvs = new[] { typeof(global::System.Runtime.CompilerServices.CallConvCdecl) })]");
+            _c.Open($"internal static int {e.Name}({string.Join(", ", ps)})");
+            _c.Open("try");
+            _c.Line($"var hx_o = ({G(e.Owner!)}){gch}.FromIntPtr((global::System.IntPtr)handle).Target;");
+            _c.Line("if (hx_o is null)");
+            _c.Line("    return 1;");
+            _c.Line(r.Kind switch
+            {
+                MapKind.Void => call + ";",
+                MapKind.Bool => $"*result = {call} ? (byte)1 : (byte)0;",
+                MapKind.TypeId => $"*result = global::Helix.Interop.Types.Of({call});",
+                MapKind.String => $"global::Helix.Interop.Native.PassString16({call}, result);",
+                MapKind.Object => $"*result = global::Helix.Interop.Objects.Pass({call});",
+                _ => $"*result = {call};",
+            });
+            _c.Line("return 0;");
+            _c.Close();
+            _c.Open("catch (global::System.Exception hx_e)");
+            _c.Line("global::Helix.Interop.Native.ReportException(hx_e);");
+            _c.Line("return 3;");
+            _c.Close();
+            _c.Close();
+            _c.Line();
+        }
+    }
+
+    // The virtual functions a C# class deriving from a generated one overrides: a bit each, found once per class.
+    void WriteMasks()
+    {
+        foreach ((TypeModel t, List<Overridable> virtuals) in _b.Overridables)
+        {
+            string cache = $"s_Mask_{t.Ident}";
+            _c.Line($"static readonly global::System.Collections.Generic.Dictionary<global::System.Type, ulong> {cache} = new();");
+            _c.Open($"internal static ulong HxMask_{t.Ident}(global::System.Type type)");
+            _c.Open($"lock ({cache})");
+            _c.Line($"if ({cache}.TryGetValue(type, out ulong known))");
+            _c.Line("    return known;");
+            _c.Line("ulong mask = 0;");
+            foreach (Overridable o in virtuals)
+            {
+                MethodModel m = o.Nearest;
+                string types = string.Join(", ", m.Parameters.Select(p =>
+                {
+                    Mapping pm = _b.Map.Map(p.Type, m.Where, p.Name);
+                    return pm.ByRef ? $"typeof({CsValue(pm)}).MakeByRefType()" : $"typeof({CsType(pm)})";
+                }));
+                _c.Line($"if (global::Helix.Interop.Types.Overrides(type, \"{m.CsName}\", new global::System.Type[] {{ {types} }}))");
+                _c.Line($"    mask |= 1ul << {o.Bit};");
+            }
+            _c.Line($"{cache}[type] = mask;");
+            _c.Line("return mask;");
+            _c.Close();
+            _c.Close();
+            _c.Line();
+        }
+    }
+
     void WriteModule()
     {
         List<TypeModel> ordered = _b.Ordered();
@@ -701,12 +961,28 @@ public sealed class CsGenerator
         _c.Line($"public const ulong Hash = 0x{_b.Hash:x16}ul;");
         _c.Line($"public const int FunctionCount = {_b.Thunks.Count};");
         foreach (Thunk th in _b.Thunks)
+        {
+            // Thunks no member called (base calls of functions C# does not show, makers of C# subclasses that are
+            // not constructed): the same function pointer type a member would have.
+            if (!_fnTypes.ContainsKey(th))
+            {
+                Call call = th.Method != null ? NewCall(th.Method) : new Call();
+                if (th.Kind == ThunkKind.NewDerived)
+                {
+                    call.Abi.Add("ulong");
+                    call.Abi.Add("ulong");
+                }
+                _fnTypes[th] = FnType(th, call, th.Type.Kind != MapKind.Void, th.Type);
+            }
             _c.Line($"internal static {_fnTypes[th]} {th.Name};");
+        }
         _c.Line();
         foreach (string cb in _callbacks)
             foreach (string line in cb.TrimEnd('\n').Split('\n'))
                 _c.Line(line.TrimEnd());
         _c.Line();
+        WriteExports();
+        WriteMasks();
         _c.Line("/// <summary>Registers the native module's types, takes its function table (checked against this build's shape) and");
         _c.Line("/// makes its types and wrappers known; `export` finds a function the native module exports.</summary>");
         _c.Open("public static void Load(global::System.Func<string, global::System.IntPtr> export)");
@@ -728,13 +1004,29 @@ public sealed class CsGenerator
         _c.Line("uint* ids = types(&typeCount);");
         _c.Line($"if (typeCount != {ordered.Count})");
         _c.Line($"    throw new global::System.InvalidOperationException(\"{_b.Module.Name}: the native module lists other types\");");
+        foreach (TypeModel r in ordered.Where(t => _b.IsObjectClass(t) && _b.RootOf(t) == t))
+        {
+            Thunk get = _b.Thunks.First(x => x.Owner == r && x.Kind == ThunkKind.GetWrapper);
+            Thunk set = _b.Thunks.First(x => x.Owner == r && x.Kind == ThunkKind.SetWrapper);
+            _c.Line($"var hxRoot_{r.Ident} = new global::Helix.Interop.RootFunctions((void*){get.Name}, (void*){set.Name});");
+        }
         for (int i = 0; i < ordered.Count; i++)
         {
             TypeModel t = ordered[i];
             _c.Line($"global::Helix.Interop.Types.Register(typeof({G(t)}), ids[{i}]);");
-            if (_b.IsObjectClass(t) && !t.Tag.Has("Abstract"))
-                _c.Line($"global::Helix.Interop.Objects.RegisterFactory(ids[{i}], typeof({G(t)}), id => new {G(t)}(id));");
+            if (_b.IsObjectClass(t))
+                _c.Line($"global::Helix.Interop.Objects.RegisterFactory(ids[{i}], typeof({G(t)}), " +
+                        $"{(t.Tag.Has("Abstract") ? "null" : $"id => new {G(t)}(id)")}, hxRoot_{_b.RootOf(t).Ident});");
         }
+        // The C# side's functions for the native module.
+        _c.Line($"var setManaged = (delegate* unmanaged[Cdecl]<void**, uint, ulong, byte>)export(\"HxBindings_{ModuleIdent}_SetManaged\");");
+        _c.Line($"void** managed = (void**)global::System.Runtime.InteropServices.NativeMemory.Alloc((nuint)({_b.Managed.Count} * sizeof(void*)));");
+        foreach (ManagedEntry e in _b.Managed)
+            _c.Line(e.Kind == ExportKind.Release
+                ? $"managed[{e.Index}] = (void*)(delegate* unmanaged[Cdecl]<ulong, void>)&global::Helix.Interop.Objects.ReleaseHandle;"
+                : $"managed[{e.Index}] = (void*)({_exportTypes[e]})&{e.Name};");
+        _c.Line($"if (setManaged == null || setManaged(managed, {_b.Managed.Count}u, Hash) == 0)");
+        _c.Line($"    throw new global::System.InvalidOperationException(\"{_b.Module.Name}: the native module takes no C# functions of this build\");");
         foreach (TypeModel t in ordered.Where(t => t.Kind == TypeKind.Struct))
         {
             (int size, _) = _b.Map.Layout(t);

@@ -51,7 +51,7 @@ HX_TEST(Bindings, TypesAreRegistered)
     HX_CHECK(GetType(TypeOf<Layers>())->element == TypeOf<u8>());
     u32 count = 0;
     const u32* ids = HxBindings_Sample_Types(&count);
-    HX_CHECK(count == 9);
+    HX_CHECK(count == 10);
     bool all = true;
     for (u32 i = 0; i < count; i++)
         all = all && GetType(TypeId{ids[i]}) != nullptr;
@@ -137,8 +137,14 @@ HX_TEST(Bindings, MethodsPropertiesAndStatics)
     Variant type[] = {Variant::OfType(mover)};
     HX_CHECK(Invoke(mover, "FindFirst", nullptr, Span<const Variant>(type), r, error) && r.AsObject() == m);
     Variant create[] = {Variant::Text("other")};
-    HX_CHECK(Invoke(mover, "Create", nullptr, Span<const Variant>(create), r, error) && r.AsObject() != nullptr && r.Type() == mover);
+    HX_CHECK(Invoke(mover, ".ctor", nullptr, Span<const Variant>(create), r, error) && r.AsObject() != nullptr && r.Type() == mover);
     HX_CHECK(Thing::Count() == 2);
+    // An interface argument by reflection: the object found through the class that implements it; virtual
+    // functions dispatch as in C++.
+    i32 before = m->health;
+    Variant hurt[] = {Variant::Object(mover, m), Variant::From(i32(4))};
+    HX_CHECK(Invoke(mover, "Hurt", nullptr, Span<const Variant>(hurt), r, error) && m->health == before - 4);
+    HX_CHECK(Invoke(TypeOf<Thing>(), "Weight", static_cast<Thing*>(m), Span<const Variant>(), r, error) && r.AsInt() == 10);
     // The reference argument must not be null.
     Variant link[] = {Variant::Object(TypeOf<Thing>(), nullptr)};
     HX_CHECK(!Invoke(mover, "Link", m, Span<const Variant>(link), r, error) && !error.Empty());

@@ -503,9 +503,15 @@ public sealed class Parser
         head.RemoveAt(head.Count - 1);
         if (Peek().Is("("))
         {
-            if (head.Count == 0)
-                throw Error("a constructor: tag a static factory with HX_FUNCTION(Constructor) instead");
-            var m = new MethodModel { Name = name, Return = ParseTypeTokens(head), Static = isStatic, Virtual = isVirtual, Tag = args, Where = where };
+            bool constructor = head.Count == 0;
+            if (constructor && (name != owner.Name || tag != "HX_FUNCTION" || !args.Has("Constructor")))
+                throw Error("a constructor without HX_FUNCTION(Constructor)");
+            var m = constructor
+                ? new MethodModel
+                {
+                    Name = name, Return = new TypeRef { Name = owner.Name, Pointers = 1 }, Static = true, RealConstructor = true, Tag = args, Where = where,
+                }
+                : new MethodModel { Name = name, Return = ParseTypeTokens(head), Static = isStatic, Virtual = isVirtual, Tag = args, Where = where };
             _pos++;
             while (!Peek().Is(")"))
             {
@@ -561,7 +567,14 @@ public sealed class Parser
             }
             if (Peek().Is("="))
             {
+                m.Abstract = Peek(1).Is("0");
                 while (!Peek().Is(";") && Peek().Kind != TokenKind.End)
+                    _pos++;
+            }
+            // A constructor's member initializers.
+            if (Peek().Is(":"))
+            {
+                while (!Peek().Is("{") && Peek().Kind != TokenKind.End)
                     _pos++;
             }
             if (Peek().Is("{"))

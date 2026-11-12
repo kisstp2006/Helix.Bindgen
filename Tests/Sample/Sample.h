@@ -71,12 +71,20 @@ namespace helix::sample
         HX_FUNCTION() static Thing* Find(StringView name);
         HX_FUNCTION() void Destroy();
 
+        // Virtual functions C# classes override, called from C++.
+        HX_FUNCTION() virtual i32 Weight() const { return 1; }
+        HX_FUNCTION() virtual String Greeting(StringView to) const;
+        HX_FUNCTION() static i32 TotalWeight();
+        HX_FUNCTION() static String GreetAll(StringView to);
+
         u64 Id() const { return id_; }
+        u64& Wrapper() { return wrapper_; }
         virtual scripting::TypeId HelixType() const;
 
     private:
         String name_;
         u64 id_ = 0;
+        u64 wrapper_ = 0;
     };
 
     HX_CLASS()
@@ -90,9 +98,9 @@ namespace helix::sample
             Run,
         };
 
-        explicit Mover(StringView name) : Thing(name) {}
+        HX_FUNCTION(Constructor) explicit Mover(StringView name) : Thing(name) { created++; }
 
-        HX_FUNCTION(Constructor) static Mover* Create(StringView name);
+        static Mover* Create(StringView name) { return new Mover(name); }
 
         HX_FIELD() f32 speed = 1;
         HX_FIELD() Mode mode = Mode::Walk;
@@ -117,6 +125,12 @@ namespace helix::sample
         HX_FUNCTION() Array<Vector3> Path(i32 steps) const;
         HX_FUNCTION() String Describe(StringView prefix, bool loud = false) const;
         HX_FUNCTION() void Damage(i32 amount) override;
+        HX_FUNCTION() i32 Weight() const override { return 10; }
+        HX_FUNCTION() virtual void OnHit(i32 damage) { health -= damage; }
+        HX_FUNCTION() void TakeHit(i32 damage) { OnHit(damage); }
+        // Interfaces from C#: a native object that implements one, or a C# object.
+        HX_FUNCTION() static void Hurt(IDamageable& target, i32 amount) { target.Damage(amount); }
+        HX_FUNCTION() static bool HurtIfAny(IDamageable* target, i32 amount);
         HX_FUNCTION() void Link(Thing& other);
         HX_FUNCTION() i32 CountAlive(const Array<Thing*>& things) const;
         HX_FUNCTION() scripting::TypeId KindOf() const;
@@ -140,6 +154,18 @@ namespace helix::sample
         HX_FIELD(SerializeField) i32 secret_ = 7;
     };
 
+    // Abstract in C++: made only as the subclass of a C# class that overrides Area.
+    HX_CLASS()
+    class Shape : public Thing
+    {
+    public:
+        HX_FUNCTION(Constructor) explicit Shape(StringView name) : Thing(name) {}
+        HX_FUNCTION() virtual f32 Area() const = 0;
+        HX_FUNCTION() static f32 TotalArea();
+
+        scripting::TypeId HelixType() const override;
+    };
+
     HX_CLASS(Static)
     class World
     {
@@ -159,4 +185,5 @@ struct helix::scripting::ObjectHandles<helix::sample::Thing>
     static u64 ToId(const sample::Thing* thing) { return thing->Id(); }
     static sample::Thing* FromId(u64 id);
     static TypeId TypeOf(const sample::Thing* thing) { return thing->HelixType(); }
+    static u64& WrapperOf(sample::Thing* thing) { return thing->Wrapper(); }
 };

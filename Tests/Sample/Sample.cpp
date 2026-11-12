@@ -21,6 +21,7 @@ namespace helix::sample
 
     Thing::~Thing()
     {
+        scripting::ReleaseWrapper(wrapper_);
         Array<Thing*>& things = Things();
         for (usize i = 0; i < things.Size(); i++)
             if (things[i] == this)
@@ -48,10 +49,49 @@ namespace helix::sample
 
     scripting::TypeId Thing::HelixType() const { return scripting::TypeOf<Thing>(); }
 
-    Mover* Mover::Create(StringView name)
+    String Thing::Greeting(StringView to) const
     {
-        created++;
-        return new Mover(name);
+        String s("hi ");
+        s.Append(to);
+        return s;
+    }
+
+    i32 Thing::TotalWeight()
+    {
+        i32 total = 0;
+        for (Thing* t : Things())
+            total += t->Weight();
+        return total;
+    }
+
+    String Thing::GreetAll(StringView to)
+    {
+        String all;
+        for (Thing* t : Things())
+        {
+            all.Append(t->Greeting(to));
+            all.Append(";");
+        }
+        return all;
+    }
+
+    bool Mover::HurtIfAny(IDamageable* target, i32 amount)
+    {
+        if (!target)
+            return false;
+        target->Damage(amount);
+        return true;
+    }
+
+    scripting::TypeId Shape::HelixType() const { return scripting::TypeOf<Shape>(); }
+
+    f32 Shape::TotalArea()
+    {
+        f32 total = 0;
+        for (Thing* t : Things())
+            if (scripting::IsAssignableFrom(scripting::TypeOf<Shape>(), t->HelixType()))
+                total += static_cast<Shape*>(t)->Area();
+        return total;
     }
 
     void Mover::Translate(Vector3 translation) { Translate(translation, Space::World); }

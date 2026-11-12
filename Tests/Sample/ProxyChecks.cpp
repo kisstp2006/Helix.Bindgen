@@ -90,5 +90,58 @@ HX_BINDINGS_EXPORT i32 SampleRunProxies()
 
     if (m)
         m->Destroy();
+
+    // A C# interface implemented in C++, handed to C# for the call (and not after it).
+    struct Scorer final : Scripts::IScorer
+    {
+        i32 calls = 0;
+        i32 Score(i32 value) override
+        {
+            calls++;
+            return value * 3;
+        }
+        String Label(StringView prefix) override
+        {
+            String s(prefix);
+            s.Append("triple");
+            return s;
+        }
+        bool Accepts(char16_t c) override { return c == u'x'; }
+    } scorer;
+    Check(c.UseScorer(scorer, 5) == 15 && scorer.calls == 1, "C# calls a C++ implementation of its interface");
+    Check(c.Describe(scorer) == "score: triple6", "strings both ways through the interface");
+    c.Keep(scorer);
+    gErrors = 0;
+    AddLogSink(&CountErrors, nullptr);
+    Check(c.UseKept() == 0, "a C++ object kept by C# after the call is not reached");
+    RemoveLogSink(&CountErrors, nullptr);
+    Check(gErrors == 1 && scorer.calls == 2, "the use of a kept C++ object fails in C# and is logged");
+
+    // C# events and delegates given C++ functions.
+    struct Seen
+    {
+        i32 last = 0;
+        i32 calls = 0;
+        i32 trues = 0;
+    } seen;
+    u64 token = c.Changed.Add({[](void* user, i32 v) {
+                                   static_cast<Seen*>(user)->last = v;
+                                   static_cast<Seen*>(user)->calls++;
+                               },
+                               &seen});
+    c.value = 1;
+    c.Increment(4);
+    Check(token != 0 && seen.last == 5 && seen.calls == 1, "a C++ handler of a C# event");
+    c.Changed.Remove(token);
+    c.Increment(1);
+    Check(seen.calls == 1, "a removed C++ handler is not called");
+    u64 reset = Counter::Reset.Add({[](void* user) { static_cast<Seen*>(user)->calls += 10; }, &seen});
+    Counter::FireReset();
+    Counter::Reset.Remove(reset);
+    Counter::FireReset();
+    Check(seen.calls == 11, "a C++ handler of a static C# event");
+    Check(c.Apply({[](void* user, i32 v) { return v * *static_cast<i32*>(user); }, &half}, 7) == 7 * half, "a C++ function as a Func");
+    c.Each({[](void* user, i32, bool even) { static_cast<Seen*>(user)->trues += even ? 1 : 0; }, &seen});
+    Check(seen.trues == 2, "a C++ function as an Action with a bool");
     return gFailures;
 }
