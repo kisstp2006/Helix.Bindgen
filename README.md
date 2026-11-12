@@ -38,7 +38,7 @@ private:
 
 - Types: `HX_CLASS`, `HX_STRUCT` (plain fields, the same layout in C#, checked by static asserts and at load),
   `HX_ENUM`, `HX_INTERFACE`; nested types; `Namespace`, `Attributes` (C# attributes as text), `Sealed`, `Abstract`,
-  `Static`, and `Root` on the class whose ids identify every object below it (`ObjectHandles<Root>` gives ids, objects
+  `Internal` (an internal C# type), `Static`, and `Root` on the class whose ids identify every object below it (`ObjectHandles<Root>` gives ids, objects
   and dynamic types).
 - Members: `HX_FIELD` (a C# property on classes, a field on structs; `ReadOnly`, `NonSerialized`, private ones with
   `SerializeField` are registered for serialization but not in C#), `HX_PROPERTY` on a getter (the setter `Set<Name>`
@@ -79,6 +79,16 @@ private:
   properties and events with invokers on Variants, so reflection, serialization and tools reach both languages alike.
   The types of the modules a module references (`REFERENCES`) are found by name, so a module in a binary of its own
   (a game module loaded at run time) knows them.
+- The C++ script API (`helix_bindgen(... API)`, `<Namespace>/<Module>Api.h`): per class a value handle in its C#
+  namespace that holds the object's id and calls the module's function table (the thunks C# calls): properties as
+  members read and written as in C# (`m.speed = 2.5f; f32 s = m.speed;`, their types cannot be copied, so `auto` does
+  not take them), methods with overloads and defaults, statics, constructors as `New`, generic members as templates
+  (`GetComponent<T>()` gives a handle, or an `ObjectRef` for a C++ script class), out and ref parameters as
+  references, the reference's null semantics (`if (go)`, `go == nullptr` once destroyed); value types and enums are
+  aliases of the C++ types; a class tagged `ScriptBase` becomes the C++ class scripts derive from, with the members
+  of its chain (and the API's names for the classes of that chain). Events take a `Callback` and answer a token for
+  `Remove`. A failed call is logged and answers the default. A member tagged `Internal` is internal in C# (for C#
+  written by hand next to it) and still in the C++ API.
 - Scripts: a class deriving from a class tagged `ScriptBase` (the engine's GameBehaviour) is a script class: its
   message methods (public or not, no virtual needed) and its methods without arguments or with one bool are
   registered as a `NativeScriptClass` with function pointers; the tag argument `Order = <n>` is its DefaultExecutionOrder.

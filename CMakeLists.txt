@@ -18,7 +18,7 @@ if(HELIX_BUILD_TESTS AND PROJECT_IS_TOP_LEVEL)
     target_include_directories(helix_bindgen_sample PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/Tests")
     target_link_libraries(helix_bindgen_sample PUBLIC Helix::Scripting)
     helix_apply_options(helix_bindgen_sample)
-    helix_bindgen(helix_bindgen_sample MODULE Sample NAMESPACE Sample HEADERS "${sample_dir}/Sample.h"
+    helix_bindgen(helix_bindgen_sample MODULE Sample NAMESPACE Sample HEADERS "${sample_dir}/Sample.h" API
                   INCLUDE_ROOTS "${CMAKE_CURRENT_SOURCE_DIR}/Tests" CS_OUTPUT sample_cs)
 
     helix_add_test_suite(helix_bindgen_tests EXCLUDE "/Sample/" DEPS helix_bindgen_sample Helix::Scripting)

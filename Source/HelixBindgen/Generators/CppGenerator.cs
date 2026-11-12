@@ -882,7 +882,7 @@ public sealed class CppGenerator
         _c.Line($"    mod = RegisterModule(\"{_b.Module.Name}\", ModuleKind::{moduleKind});");
         // The types of the modules this one references, found by name: a module in a binary of its own (a game module
         // against the shared engine on Windows) has its own TypeOf slots, which the other binary filled.
-        foreach (TypeModel t in _b.Module.Types.Where(t => t.External))
+        foreach (TypeModel t in UsedExternals())
         {
             _c.Line($"if (!TypeOf<{Q(t)}>().IsValid())");
             _c.Line($"    BindNativeType<{Q(t)}>(FindType(\"{t.CsNamespace}.{t.RegistryName}\"));");
@@ -946,6 +946,35 @@ public sealed class CppGenerator
         foreach (string e in new[] { "Register", "Unregister", "SetManaged", "Functions", "Types" })
             _c.Line($"::helix::scripting::RegisterNativeExport(\"HxBindings_{ModuleIdent}_{e}\", std::bit_cast<const void*>(&HxBindings_{ModuleIdent}_{e}));");
         _c.Close();
+    }
+
+    // The referenced modules' types this module uses (its bases and the types of its members): their headers are the
+    // ones its own headers include.
+    List<TypeModel> UsedExternals()
+    {
+        var used = new List<TypeModel>();
+        void Add(TypeModel? t)
+        {
+            if (t != null && t.External && !used.Contains(t))
+                used.Add(t);
+        }
+        void AddMapping(Mapping m)
+        {
+            Add(m.Bound);
+            if (m.Element != null)
+                AddMapping(m.Element);
+        }
+        foreach (TypeModel t in _b.Module.Types.Where(t => !t.External))
+            foreach (TypeModel c in _b.BaseChain(t))
+                Add(c);
+        foreach (Thunk th in _b.Thunks)
+        {
+            AddMapping(th.Type);
+            if (th.Method != null)
+                foreach (ParameterModel p in th.Method.Parameters)
+                    AddMapping(_b.Map.Map(p.Type, th.Method.Where, p.Name));
+        }
+        return used;
     }
 
     void WriteBuilder(TypeModel t, string id)

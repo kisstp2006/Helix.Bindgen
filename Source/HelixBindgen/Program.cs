@@ -8,7 +8,7 @@ namespace Helix.Bindgen;
 
 /// <summary>
 /// Native to C#:  HelixBindgen --module Name --namespace CsNamespace [--kind Engine|NativeGame] --header a.h ...
-///                  [--reference b.h ...] [--include-root dir ...] --out-cpp file.cpp --out-cs file.cs
+///                  [--reference b.h ...] [--include-root dir ...] --out-cpp file.cpp --out-cs file.cs [--out-api file.h]
 /// C# to native:  HelixBindgen --module AssemblyName --assembly file.dll --proxy Namespace.Type ... [--reference b.h ...]
 ///                  [--include-root dir ...] --out-h file.h --out-cpp file.cpp --out-cs file.cs
 /// Headers are the module's own (generated); references are other modules' headers (their types known, not generated).
@@ -37,7 +37,7 @@ public static class Program
 
     static int Run(string[] args)
     {
-        string? module = null, ns = null, outCpp = null, outCs = null, outH = null, assembly = null;
+        string? module = null, ns = null, outCpp = null, outCs = null, outH = null, outApi = null, assembly = null;
         var proxies = new List<string>();
         string kind = "NativeGame";
         var headers = new List<string>();
@@ -57,6 +57,7 @@ public static class Program
                 case "--out-cpp": outCpp = Value(); break;
                 case "--out-cs": outCs = Value(); break;
                 case "--out-h": outH = Value(); break;
+                case "--out-api": outApi = Value(); break;
                 case "--assembly": assembly = Value(); break;
                 case "--proxy": proxies.Add(Value()); break;
                 default:
@@ -94,6 +95,8 @@ public static class Program
             WriteIfChanged(outCpp, CppGenerator.Generate(binding, headers.Select(h => Include(h, roots)), kind));
         if (outCs != null)
             WriteIfChanged(outCs, CsGenerator.Generate(binding));
+        if (outApi != null)
+            WriteIfChanged(outApi, ApiGenerator.Generate(binding, headers.Select(h => Include(h, roots))));
         return 0;
     }
 

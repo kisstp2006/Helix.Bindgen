@@ -71,6 +71,8 @@ public sealed class TypeMap
             _byName[t.CppName] = t;
             if (t.Outer != null)
                 _byName[t.Outer.Name + "::" + t.Name] = t;
+            // The C++ script API names a class by its C# namespace (HelixEngine::GameBehaviour).
+            _byName.TryAdd(t.CsFullName.Replace(".", "::"), t);
         }
     }
 

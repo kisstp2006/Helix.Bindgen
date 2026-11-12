@@ -113,11 +113,11 @@ public sealed class CsGenerator
                 return;
             case TypeKind.Struct:
                 _c.Line("[global::System.Runtime.InteropServices.StructLayout(global::System.Runtime.InteropServices.LayoutKind.Sequential)]");
-                _c.Open($"public partial struct {t.Name}");
+                _c.Open($"{(t.Tag.Has("Internal") ? "internal" : "public")} partial struct {t.Name}");
                 foreach (FieldModel f in t.Fields)
                 {
                     Attributes(f.Tag);
-                    _c.Line($"public {CsValue(_b.Map.Map(f.Type, f.Where, f.Name))} {Id(f.CsName)};");
+                    _c.Line($"{(f.Tag.Has("Private") ? "private" : "public")} {CsValue(_b.Map.Map(f.Type, f.Where, f.Name))} {Id(f.CsName)};");
                 }
                 foreach (TypeModel n in Nested(t))
                     WriteType(n);
@@ -133,7 +133,7 @@ public sealed class CsGenerator
                 return;
         }
         string mods = t.Tag.Has("Static") ? "static " : t.Tag.Has("Sealed") ? "sealed " : t.Tag.Has("Abstract") ? "abstract " : "";
-        _c.Open($"public {mods}unsafe partial class {t.Name}{Inherits(t)}");
+        _c.Open($"{(t.Tag.Has("Internal") ? "internal" : "public")} {mods}unsafe partial class {t.Name}{Inherits(t)}");
         bool objectClass = _b.IsObjectClass(t);
         if (objectClass)
         {
@@ -426,7 +426,7 @@ public sealed class CsGenerator
                 FieldModel f = th.Field!;
                 Thunk? set = _b.Thunks.FirstOrDefault(x => x.Kind == ThunkKind.FieldSet && x.Field == f);
                 Attributes(f.Tag);
-                _c.Open($"public {st}{CsType(th.Type)} {Id(f.CsName)}");
+                _c.Open($"{Access(f.Tag)} {st}{CsType(th.Type)} {Id(f.CsName)}");
                 _c.Open("get");
                 Body(th, new Call(), th.Type, $"{t.Name}.{f.CsName}", true);
                 _c.Close();
@@ -450,7 +450,7 @@ public sealed class CsGenerator
                 PropertyModel p = th.Property;
                 Thunk? set = _b.Thunks.FirstOrDefault(x => x.Property == p && x.IsSetter);
                 Attributes(p.Getter.Tag);
-                _c.Open($"public {st}{CsType(th.Type)} {Id(p.CsName)}");
+                _c.Open($"{Access(p.Getter.Tag)} {st}{CsType(th.Type)} {Id(p.CsName)}");
                 _c.Open("get");
                 Body(th, new Call(), th.Type, $"{t.Name}.{p.CsName}", true);
                 _c.Close();
@@ -524,20 +524,26 @@ public sealed class CsGenerator
         }
         else
         {
-            _c.Open($"public {st}{CsType(th.Type)} {Id(m.CsName)}({ps})");
+            _c.Open($"{Access(m.Tag)} {st}{CsType(th.Type)} {Id(m.CsName)}({ps})");
             Body(th, call, th.Type, what, true);
             _c.Close();
         }
         if (m.Tag.Has("Lists") && th.Type.Kind == MapKind.Array)
         {
-            string args = string.Join(", ", m.Parameters.Select(p => Pass(m, p)));
+            // One overload per count of the defaulted parameters given (the list comes last, so no defaults).
             string list = $"global::System.Collections.Generic.List<{CsType(th.Type.Element!)}>";
-            _c.Open($"public {st}void {Id(m.CsName)}({string.Join(", ", m.Parameters.Select(p => ParamDecl(m, p)).Where(x => !x.Contains(" = ")).Append($"{list} results"))})");
-            _c.Line("if (results == null)");
-            _c.Line("    throw new global::System.ArgumentNullException(nameof(results));");
-            _c.Line("results.Clear();");
-            _c.Line($"results.AddRange({Id(m.CsName)}({args}));");
-            _c.Close();
+            int required = m.Parameters.Count(p => p.Default == null);
+            for (int k = required; k <= m.Parameters.Count; k++)
+            {
+                List<ParameterModel> given = m.Parameters.Take(k).ToList();
+                string args = string.Join(", ", given.Select(p => Pass(m, p)));
+                _c.Open($"public {st}void {Id(m.CsName)}({string.Join(", ", given.Select(p => NoDefault(ParamDecl(m, p))).Append($"{list} results"))})");
+                _c.Line("if (results == null)");
+                _c.Line("    throw new global::System.ArgumentNullException(nameof(results));");
+                _c.Line("results.Clear();");
+                _c.Line($"results.AddRange({Id(m.CsName)}({args}));");
+                _c.Close();
+            }
         }
         string? generic = m.Tag.Get("Generic");
         if (generic != null)
@@ -621,6 +627,11 @@ public sealed class CsGenerator
         }
     }
 
+    static string NoDefault(string decl) => decl.Split(" = ", 2)[0];
+
+    // A member tagged Internal is internal in C# (for C# written by hand in the assembly, still in the C++ API).
+    static string Access(TagArgs tag) => tag.Has("Internal") ? "internal" : "public";
+
     string Pass(MethodModel m, ParameterModel p)
     {
         Mapping pm = _b.Map.Map(p.Type, m.Where, p.Name);
@@ -696,13 +707,29 @@ public sealed class CsGenerator
         _c.Close();
         if (m.Tag.Has("Lists") && r.Kind == MapKind.Array && IsT(r.Element!))
         {
-            _c.Open($"public {st}void {Id(m.CsName)}<{tp}>({string.Join(", ", decls.Where(x => !x.Contains(" = ")).Append($"global::System.Collections.Generic.List<{tp}> results"))}){where}");
-            _c.Line("if (results == null)");
-            _c.Line("    throw new global::System.ArgumentNullException(nameof(results));");
-            _c.Line("results.Clear();");
-            _c.Line($"foreach (var hx_e in {call})");
-            _c.Line($"    results.Add(({tp})(object)hx_e);");
-            _c.Close();
+            // One overload per count of the defaulted parameters given (as the non-generic lists).
+            var gen = m.Parameters.Where(p => _b.Map.Map(p.Type, m.Where, p.Name).Kind != MapKind.TypeId).ToList();
+            int required = gen.Count(p => p.Default == null);
+            for (int k = required; k <= gen.Count; k++)
+            {
+                var given = gen.Take(k).ToList();
+                var callArgs = new List<string>();
+                foreach (ParameterModel p in m.Parameters)
+                {
+                    if (_b.Map.Map(p.Type, m.Where, p.Name).Kind == MapKind.TypeId)
+                        callArgs.Add($"typeof({tp})");
+                    else if (given.Contains(p))
+                        callArgs.Add(Pass(m, p));
+                }
+                string listCall = $"{Id(m.CsName)}({string.Join(", ", callArgs)})";
+                _c.Open($"public {st}void {Id(m.CsName)}<{tp}>({string.Join(", ", given.Select(p => NoDefault(ParamDecl(m, p))).Append($"global::System.Collections.Generic.List<{tp}> results"))}){where}");
+                _c.Line("if (results == null)");
+                _c.Line("    throw new global::System.ArgumentNullException(nameof(results));");
+                _c.Line("results.Clear();");
+                _c.Line($"foreach (var hx_e in {listCall})");
+                _c.Line($"    results.Add(({tp})(object)hx_e);");
+                _c.Close();
+            }
         }
     }
 
