@@ -126,13 +126,18 @@ namespace Helix.Interop
     {
         static readonly Dictionary<Type, uint> s_ToNative = new();
         static readonly Dictionary<uint, Type> s_FromNative = new();
+        static readonly HashSet<Type> s_Generated = new();
 
-        public static void Register(Type type, uint nativeId)
+        /// <summary>A type and its native id; `generated` for the types of generated bindings (not C# script classes,
+        /// which have native ids too).</summary>
+        public static void Register(Type type, uint nativeId, bool generated = true)
         {
             lock (s_ToNative)
             {
                 s_ToNative[type] = nativeId;
                 s_FromNative[nativeId] = type;
+                if (generated)
+                    s_Generated.Add(type);
             }
         }
 
@@ -156,7 +161,7 @@ namespace Helix.Interop
         public static bool IsGenerated(Type type)
         {
             lock (s_ToNative)
-                return type != null && s_ToNative.ContainsKey(type);
+                return type != null && s_Generated.Contains(type);
         }
 
         /// <summary>The native id of the nearest generated type of an object's class.</summary>
