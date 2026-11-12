@@ -298,6 +298,17 @@ public sealed class CppGenerator
         _c.Line("template <class T>");
         _c.Line("T HxDefault() { return T(); }");
         _c.Line();
+        _c.Line("// A type of the module: the one it has (declared by the module's own registry), else a new one.");
+        _c.Open("TypeId HxDeclare(ModuleId module, StringView nameSpace, StringView name, TypeKind kind, TypeId base, u32 flags)");
+        _c.Line("String full(nameSpace);");
+        _c.Line("full.Append(\".\");");
+        _c.Line("full.Append(name);");
+        _c.Line("TypeId known = FindType(full);");
+        _c.Line("if (known.IsValid() && GetType(known)->module == module)");
+        _c.Line("    return known;");
+        _c.Line("return DeclareType(module, nameSpace, name, kind, base, flags);");
+        _c.Close();
+        _c.Line();
         foreach (TypeModel i in Own.Where(t => t.Kind == TypeKind.Interface))
         {
             string q = Q(i);
@@ -821,7 +832,7 @@ public sealed class CppGenerator
             string flags = t.Kind is TypeKind.Class or TypeKind.Interface
                 ? $"(std::is_abstract_v<{Q(t)}> ? u32(TypeAbstract) : 0u){(t.Tag.Has("Sealed") ? " | u32(TypeSealed)" : "")}"
                 : "TypeNone";
-            _c.Line($"TypeId {ids[t]} = DeclareType(mod, \"{t.CsNamespace}\", \"{t.RegistryName}\", TypeKind::{kind}, {baseExpr}, {flags});");
+            _c.Line($"TypeId {ids[t]} = HxDeclare(mod, \"{t.CsNamespace}\", \"{t.RegistryName}\", TypeKind::{kind}, {baseExpr}, {flags});");
             _c.Line($"if (!{ids[t]}.IsValid())");
             _c.Line("    return false;");
             _c.Line($"BindNativeType<{Q(t)}>({ids[t]});");
@@ -855,6 +866,12 @@ public sealed class CppGenerator
         _c.Open($"HX_BINDINGS_EXPORT const ::helix::u32* HxBindings_{ModuleIdent}_Types(::helix::u32* count)");
         _c.Line($"*count = {types.Count}u;");
         _c.Line("return gHxTypes;");
+        _c.Close();
+        _c.Line();
+        _c.Line("// The exports by name (RegisterNativeExport), for hosts that find them without the system's symbols.");
+        _c.Open($"HX_BINDINGS_EXPORT void HxBindings_{ModuleIdent}_Publish()");
+        foreach (string e in new[] { "Register", "SetManaged", "Functions", "Types" })
+            _c.Line($"::helix::scripting::RegisterNativeExport(\"HxBindings_{ModuleIdent}_{e}\", std::bit_cast<const void*>(&HxBindings_{ModuleIdent}_{e}));");
         _c.Close();
     }
 

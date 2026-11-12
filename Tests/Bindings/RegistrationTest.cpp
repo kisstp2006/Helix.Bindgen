@@ -11,6 +11,7 @@
 HX_BINDINGS_EXPORT bool HxBindings_Sample_Register();
 HX_BINDINGS_EXPORT const void* const* HxBindings_Sample_Functions(helix::u32* count, helix::u64* hash);
 HX_BINDINGS_EXPORT const helix::u32* HxBindings_Sample_Types(helix::u32* count);
+HX_BINDINGS_EXPORT void HxBindings_Sample_Publish();
 
 using namespace helix;
 using namespace helix::scripting;
@@ -192,4 +193,8 @@ HX_TEST(Bindings, FunctionTable)
     for (u32 i = 0; i < count; i++)
         filled = filled && table[i] != nullptr;
     HX_CHECK(filled);
+    // The exports by name, for hosts without the system's symbols.
+    HxBindings_Sample_Publish();
+    HX_CHECK(FindNativeExport("HxBindings_Sample_Register") == std::bit_cast<const void*>(&HxBindings_Sample_Register));
+    HX_CHECK(FindNativeExport("HxBindings_Sample_Types") != nullptr && FindNativeExport("HxBindings_Sample_SetManaged") != nullptr);
 }

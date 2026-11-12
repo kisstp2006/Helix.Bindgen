@@ -371,6 +371,12 @@ public sealed class ProxyGenerator
         c.Line($"*count = {_m.NativeMembers.Count}u;");
         c.Line("return kNative;");
         c.Close();
+        c.Line();
+        c.Line("// The exports by name (RegisterNativeExport), for hosts that find them without the system's symbols.");
+        c.Open($"HX_BINDINGS_EXPORT void HxProxies_{ModuleIdent}_Publish()");
+        foreach (string e in new[] { "SetTable", "Native" })
+            c.Line($"::helix::scripting::RegisterNativeExport(\"HxProxies_{ModuleIdent}_{e}\", std::bit_cast<const void*>(&HxProxies_{ModuleIdent}_{e}));");
+        c.Close();
     }
 
     void ProxySource(Code c, ProxyType p)
