@@ -656,7 +656,9 @@ public sealed class ApiGenerator
         foreach ((Mapping m, string n) in args)
             In(call, m, n, g, owner);
         bool constructor = IsConstructor(th);
-        Mapping resultType = constructor ? new Mapping { Kind = MapKind.Object, Bound = owner } : th.Type;
+        // A field's setter answers nothing (its Type is the field's).
+        Mapping resultType = constructor ? new Mapping { Kind = MapKind.Object, Bound = owner }
+                             : th.Kind == ThunkKind.FieldSet ? new Mapping { Kind = MapKind.Void } : th.Type;
         (string decl, string abi, string value) = Result(resultType, g, owner, constructor);
         if (decl.Length > 0)
         {
