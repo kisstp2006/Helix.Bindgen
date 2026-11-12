@@ -22,7 +22,26 @@ public sealed class ProxyGenerator
     public static (string Header, string Source, string Exports) Generate(ProxyModel model, ModuleModel references, IEnumerable<string> includes, string headerInclude)
     {
         var g = new ProxyGenerator(model, references);
+        g.RenameParameters();
         return (g.Header(includes.ToList()), g.Source(headerInclude), g.Exports());
+    }
+
+    // C++ parameters named like a property member of their class (or a local of the definitions) get a '_'.
+    void RenameParameters()
+    {
+        var locals = new HashSet<string> { "self", "status", "r", "items", "proxy", "copy", "other", "handle" };
+        foreach (ProxyType p in _m.Types)
+        {
+            var taken = new HashSet<string>(p.Properties.Select(x => x.Name));
+            taken.UnionWith(locals);
+            foreach (ProxyMember m in p.Methods.Concat(p.Constructors).Concat(p.Properties.Select(x => x.Setter).OfType<ProxyMember>()))
+                foreach (ProxyParameter pa in m.Parameters)
+                {
+                    pa.CppName = pa.Name;
+                    while (taken.Contains(pa.CppName) || p.Methods.Any(x => x.Name == pa.CppName))
+                        pa.CppName += "_";
+                }
+        }
     }
 
     string ModuleIdent => new string(_m.Module.Select(c => char.IsLetterOrDigit(c) ? c : '_').ToArray());
@@ -150,7 +169,7 @@ public sealed class ProxyGenerator
             c.Close();
     }
 
-    string Params(ProxyMember m) => string.Join(", ", m.Parameters.Select(p => $"{CppIn(p.Type)} {p.Name}"));
+    string Params(ProxyMember m) => string.Join(", ", m.Parameters.Select(p => $"{CppIn(p.Type)} {p.CppName}"));
 
     string Ret(ProxyMember m) => m.Return.Kind == ManagedKind.Void ? "void" : CppValue(m.Return);
 
@@ -190,7 +209,7 @@ public sealed class ProxyGenerator
             c.Line($"{t} Get() const;");
             if (prop.Setter != null)
             {
-                c.Line($"{s}& operator=({CppIn(prop.Type)} value);");
+                c.Line($"{s}& operator=({CppIn(prop.Type)} {prop.Setter.Parameters[0].CppName});");
                 c.Line($"{s}& operator=(const {s}& other) {{ return *this = other.Get(); }}");
             }
             else
@@ -295,7 +314,7 @@ public sealed class ProxyGenerator
                 $"reinterpret_cast<const {q}*>(reinterpret_cast<const char*>(this) - ::helix::scripting::OffsetOf(&{q}::{prop.Name}))->handle_";
             Member(c, $"auto {s}::Get() const -> {CppValue(prop.Type)}", p, prop.Getter, owner);
             if (prop.Setter != null)
-                Member(c, $"auto {s}::operator=({CppIn(prop.Type)} value) -> {s}&", p, prop.Setter, owner, "*this");
+                Member(c, $"auto {s}::operator=({CppIn(prop.Type)} {prop.Setter.Parameters[0].CppName}) -> {s}&", p, prop.Setter, owner, "*this");
         }
     }
 
@@ -324,7 +343,7 @@ public sealed class ProxyGenerator
         }
         foreach (ProxyParameter pa in m.Parameters)
         {
-            (List<string> a, List<string> x, string? prep) = CppArg(pa.Type, pa.Name);
+            (List<string> a, List<string> x, string? prep) = CppArg(pa.Type, pa.CppName);
             if (prep != null)
                 c.Line(prep);
             abi.AddRange(a);

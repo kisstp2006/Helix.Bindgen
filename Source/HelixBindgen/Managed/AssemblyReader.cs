@@ -61,6 +61,8 @@ public enum ProxyMemberKind
 public sealed class ProxyParameter
 {
     public string Name = "";
+    /// <summary>The name in C++ (renamed where it would hide a member).</summary>
+    public string CppName = "";
     public ManagedType Type = new();
     public bool Out;
 }
