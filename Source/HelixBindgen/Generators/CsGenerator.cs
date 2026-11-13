@@ -335,7 +335,12 @@ public sealed class CsGenerator
             case MapKind.Array:
             {
                 Mapping e = m.Element!;
-                if (e.Kind == MapKind.Object)
+                if (e.Kind == MapKind.String)
+                {
+                    call.Pre.Add($"global::Helix.Interop.InteropString16* {local} = global::Helix.Interop.Native.PassStrings({n});");
+                    call.Abi.Add("global::Helix.Interop.InteropString16*");
+                }
+                else if (e.Kind == MapKind.Object)
                 {
                     call.Pre.Add($"ulong[] {local}_ids = global::Helix.Interop.Objects.Ids({n}, x => (({Root(e)})x).m_HxId);");
                     call.Fixed.Add($"fixed (ulong* {local} = {local}_ids)");
@@ -365,7 +370,9 @@ public sealed class CsGenerator
         MapKind.Object => ("global::Helix.Interop.InteropObject hx_r;", $"global::Helix.Interop.Objects.Wrap<{CsType(m)}>(hx_r)"),
         MapKind.Array => m.Element!.Kind == MapKind.Object
             ? ("global::Helix.Interop.InteropArray hx_r;", $"global::Helix.Interop.Objects.WrapArray<{CsType(m.Element!)}>(hx_r)")
-            : ("global::Helix.Interop.InteropArray hx_r;", $"global::Helix.Interop.Native.ReadArray<{CsValue(m.Element!)}>(hx_r)"),
+            : m.Element!.Kind == MapKind.String
+                ? ("global::Helix.Interop.InteropArray hx_r;", "global::Helix.Interop.Native.ReadStrings(hx_r)")
+                : ("global::Helix.Interop.InteropArray hx_r;", $"global::Helix.Interop.Native.ReadArray<{CsValue(m.Element!)}>(hx_r)"),
         _ => ($"{CsType(m)} hx_r;", "hx_r"),
     };
 
@@ -462,6 +469,9 @@ public sealed class CsGenerator
                     Body(set, call, set.Type, $"{t.Name}.{p.CsName}", false);
                     _c.Close();
                 }
+                else if (p.Getter.Tag.Has("SetterThrows"))
+                    // The member has a setter that is not supported (the C++ script API has the getter only).
+                    _c.Line("set => throw new global::System.NotImplementedException();");
                 _c.Close();
                 return;
             }

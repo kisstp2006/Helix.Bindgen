@@ -74,6 +74,44 @@ namespace Helix.Interop
 
         public static T[] ReadArray<T>(InteropArray a) where T : unmanaged => ReadArray((T*)a.data, a.count);
 
+        /// <summary>Strings native code handed out (an array of InteropString).</summary>
+        public static string[] ReadStrings(InteropArray a)
+        {
+            if (a.count <= 0)
+                return Array.Empty<string>();
+            var result = new string[a.count];
+            var items = (InteropString*)a.data;
+            for (int i = 0; i < a.count; i++)
+                result[i] = ReadString(items[i]);
+            return result;
+        }
+
+        [ThreadStatic] static void* t_StringsChars;
+        [ThreadStatic] static int t_StringsCharsCapacity;
+        [ThreadStatic] static void* t_StringsItems;
+        [ThreadStatic] static int t_StringsItemsCapacity;
+
+        /// <summary>Strings handed to native code: UTF-16 code units, valid until the thread's next such call.</summary>
+        public static InteropString16* PassStrings(string[] items)
+        {
+            int n = items == null ? 0 : items.Length;
+            int chars = 0;
+            for (int i = 0; i < n; i++)
+                chars += items[i]?.Length ?? 0;
+            char* data = (char*)Buffer(ref t_StringsChars, ref t_StringsCharsCapacity, Math.Max(2, chars * 2));
+            var result = (InteropString16*)Buffer(ref t_StringsItems, ref t_StringsItemsCapacity, Math.Max(1, n) * sizeof(InteropString16));
+            int at = 0;
+            for (int i = 0; i < n; i++)
+            {
+                string s = items[i] ?? "";
+                s.AsSpan().CopyTo(new Span<char>(data + at, s.Length));
+                result[i].data = data + at;
+                result[i].size = s.Length;
+                at += s.Length;
+            }
+            return result;
+        }
+
         // The buffers values handed to native code stay in until the thread's next call that hands one out.
         [ThreadStatic] static void* t_StringBuffer;
         [ThreadStatic] static int t_StringCapacity;

@@ -113,6 +113,8 @@ namespace helix::sample
         HX_PROPERTY() Vector3 position() const { return position_; }
         void SetPosition(Vector3 value) { position_ = value; }
         HX_PROPERTY(ReadOnly) Hit lastHit() const { return lastHit_; }
+        // Settable in C# by its signature, not by its object.
+        HX_PROPERTY(SetterThrows) i32 laps() const { return 2; }
 
         HX_FUNCTION() void Translate(Vector3 translation);
         HX_FUNCTION() void Translate(f32 x, f32 y, f32 z);
@@ -124,6 +126,10 @@ namespace helix::sample
         HX_FUNCTION() i32 Sum(Span<const i32> values) const;
         HX_FUNCTION() Array<Vector3> Path(i32 steps) const;
         HX_FUNCTION() String Describe(StringView prefix, bool loud = false) const;
+        HX_FUNCTION() Array<String> Words(i32 count) const;
+        HX_FUNCTION() i32 Letters(Span<const String> words) const;
+        // The result is a native status the bound member does not have.
+        HX_FUNCTION(Void) bool Relabel(StringView value);
         HX_FUNCTION() void Damage(i32 amount) override;
         HX_FUNCTION() i32 Weight() const override { return 10; }
         HX_FUNCTION() virtual void OnHit(i32 damage) { health -= damage; }

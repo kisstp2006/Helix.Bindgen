@@ -53,6 +53,12 @@ HX_TEST(Api, HandlesPropertiesAndMethods)
     const i32 values[] = {1, 2, 3};
     HX_CHECK(m.Sum(Span<const i32>(values, 3)) == 6 && m.Path(3).Size() == 3);
     HX_CHECK(StringView(m.Describe("x")).StartsWith("x") && m.Describe("x", true) != m.Describe("x"));
+    // Arrays of strings both ways, and a dropped result.
+    auto words = m.Words(3);
+    HX_CHECK(words.Size() == 3 && StringView(words[1]).EndsWith("!"));
+    HX_CHECK(m.Letters(words) == i32(StringView(words[0]).Size() * 3 + 1));
+    m.Relabel("renamed");
+    HX_CHECK(StringView(m.Describe("")) == "renamed");
     // Objects across: a handle in, handles out, a destroyed object is null.
     Sample::Mover other = Sample::Mover::New("api");
     m.Link(other);

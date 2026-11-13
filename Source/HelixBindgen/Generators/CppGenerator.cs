@@ -221,6 +221,7 @@ public sealed class CppGenerator
             _c.Line($"c.module = \"{_b.Module.Name}\";");
             _c.Line($"c.nameSpace = \"{t.CsNamespace}\";");
             _c.Line($"c.name = \"{t.RegistryName}\";");
+            _c.Line($"c.scriptBase = \"{_b.BaseChain(t).Skip(1).First(b => b.Tag.Has("ScriptBase")).RegistryName}\";");
             _c.Line($"c.size = u32(sizeof({q}));");
             _c.Line($"c.alignment = u32(alignof({q}));");
             _c.Line($"c.construct = [](void* m) -> void* {{ return static_cast<{root}*>(new (m) {q}()); }};");
@@ -405,6 +406,8 @@ public sealed class CppGenerator
                 case MapKind.Array:
                 {
                     Mapping el = m.Element!;
+                    if (el.Kind == MapKind.String)
+                        throw new BindgenException(new Location(), "arrays of strings do not go to C# callbacks or events");
                     abi.Add(el.Kind == MapKind.Object ? "const InteropObject*" : $"const {CType(el)}*");
                     abi.Add("i32");
                     if (el.Kind == MapKind.Object)
@@ -678,7 +681,18 @@ public sealed class CppGenerator
             {
                 Mapping e = m.Element!;
                 string et = CType(e);
-                if (e.Kind == MapKind.Object)
+                if (e.Kind == MapKind.String)
+                {
+                    // UTF-16 strings, as single string arguments come.
+                    call.Params.Add($"const InteropString16* {n}");
+                    call.Params.Add($"i32 {n}_n");
+                    call.Prep.Add($"Array<String> {n}_a;");
+                    call.Prep.Add($"{n}_a.Reserve(usize({n}_n));");
+                    call.Prep.Add($"for (i32 i = 0; i < {n}_n; i++)");
+                    call.Prep.Add($"    {n}_a.Push(StringFromUtf16({n}[i].data, {n}[i].size));");
+                    call.Args.Add(declared.Name.EndsWith("Span", StringComparison.Ordinal) ? $"Span<const String>({n}_a.Data(), {n}_a.Size())" : $"{n}_a");
+                }
+                else if (e.Kind == MapKind.Object)
                 {
                     call.Params.Add($"const u64* {n}");
                     call.Params.Add($"i32 {n}_n");
@@ -736,6 +750,16 @@ public sealed class CppGenerator
             case MapKind.Array:
             {
                 Mapping e = m.Element!;
+                if (e.Kind == MapKind.String)
+                    return new()
+                    {
+                        $"auto&& v = {expr};",
+                        "Array<StringView> views;",
+                        "views.Reserve(v.Size());",
+                        "for (const auto& s : v)",
+                        "    views.Push(StringView(s));",
+                        "*result = PassStrings(views.Data(), views.Size());",
+                    };
                 if (e.Kind == MapKind.Object)
                     return new()
                     {
@@ -953,6 +977,8 @@ public sealed class CppGenerator
                 case MapKind.Array:
                 {
                     Mapping el = m.Element!;
+                    if (el.Kind == MapKind.String)
+                        throw new BindgenException(new Location(), "arrays of strings do not go to C# callbacks or events");
                     abi.Add(el.Kind == MapKind.Object ? "const InteropObject*" : $"const {CType(el)}*");
                     abi.Add("i32");
                     if (el.Kind == MapKind.Object)

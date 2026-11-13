@@ -160,6 +160,34 @@ namespace helix::sample
         return path;
     }
 
+    Array<String> Mover::Words(i32 count) const
+    {
+        Array<String> words;
+        for (i32 i = 0; i < count; i++)
+        {
+            String s(name());
+            s.Append(i % 2 == 0 ? "" : "!");
+            words.Push(s);
+        }
+        return words;
+    }
+
+    i32 Mover::Letters(Span<const String> words) const
+    {
+        i32 total = 0;
+        for (const String& w : words)
+            total += i32(w.Size());
+        return total;
+    }
+
+    bool Mover::Relabel(StringView value)
+    {
+        if (value.Empty())
+            return false;
+        SetName(value);
+        return true;
+    }
+
     String Mover::Describe(StringView prefix, bool loud) const
     {
         String s(prefix);

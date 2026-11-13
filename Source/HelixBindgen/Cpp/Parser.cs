@@ -529,6 +529,9 @@ public sealed class Parser
                     Name = name, Return = new TypeRef { Name = owner.Name, Pointers = 1 }, Static = true, RealConstructor = true, Tag = args, Where = where,
                 }
                 : new MethodModel { Name = name, Return = ParseTypeTokens(head), Static = isStatic, Virtual = isVirtual, Tag = args, Where = where, Public = isPublic };
+            // Void: the function's result is dropped (a native status the reference's member does not have).
+            if (args.Has("Void") && !m.RealConstructor)
+                m.Return = new TypeRef { Name = "void" };
             _pos++;
             while (!Peek().Is(")"))
             {

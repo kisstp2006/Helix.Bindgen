@@ -326,7 +326,11 @@ public sealed class ApiGenerator
             string type = IsT(g, pm) && pm.ByRef ? Ref(g!, t) + "&" : ApiIn(pm);
             string decl = $"{type} {Param(t, p.Name)}";
             noDefaults.Add(decl);
-            ps.Add(p.Default != null ? $"{decl} = {p.Default}" : decl);
+            // An enum member is named by the enum's full name (the enum may be in another API namespace).
+            string? def = p.Default;
+            if (def != null && pm.Kind == MapKind.Enum && def.Contains("::"))
+                def = $"{ApiIn(pm)}::{def.Split("::")[^1]}";
+            ps.Add(def != null ? $"{decl} = {def}" : decl);
         }
         string ret;
         Mapping r = th.Type;
@@ -573,7 +577,20 @@ public sealed class ApiGenerator
             case MapKind.Array:
             {
                 Mapping e = m.Element!;
-                if (e.Kind == MapKind.Object)
+                if (e.Kind == MapKind.String)
+                {
+                    call.Abi.Add("const ::helix::scripting::InteropString16*");
+                    call.Abi.Add("::helix::i32");
+                    call.Prep.Add($"::helix::Array<::helix::scripting::ApiString16> {n}_u;");
+                    call.Prep.Add($"for (const auto& s : {n})");
+                    call.Prep.Add($"    {n}_u.Push(::helix::scripting::ApiString16(s));");
+                    call.Prep.Add($"::helix::Array<::helix::scripting::InteropString16> {n}_s;");
+                    call.Prep.Add($"for (const auto& u : {n}_u)");
+                    call.Prep.Add($"    {n}_s.Push(::helix::scripting::InteropString16{{u.Data(), u.Size()}});");
+                    call.Args.Add($"{n}_s.Data()");
+                    call.Args.Add($"::helix::i32({n}_s.Size())");
+                }
+                else if (e.Kind == MapKind.Object)
                 {
                     call.Abi.Add("const ::helix::u64*");
                     call.Abi.Add("::helix::i32");
@@ -621,8 +638,8 @@ public sealed class ApiGenerator
                 string el = IsT(g, e) ? Ref(g!, owner) : ApiValue(e);
                 string item = e.Kind == MapKind.Object
                     ? (IsT(g, e) ? $"::helix::scripting::ApiAs<{g!.Parameter}, {GenericRoot(g!, owner)}>(p[i].id)" : $"{HandleOf(e.Bound!)}::HxFromId(p[i].id)")
-                    : "p[i]";
-                string pt = e.Kind == MapKind.Object ? "::helix::scripting::InteropObject" : CType(e);
+                    : e.Kind == MapKind.String ? "::helix::scripting::ApiString(p[i])" : "p[i]";
+                string pt = e.Kind == MapKind.Object ? "::helix::scripting::InteropObject" : e.Kind == MapKind.String ? "::helix::scripting::InteropString" : CType(e);
                 return ("::helix::scripting::InteropArray hxR{};", "::helix::scripting::InteropArray*",
                         $"[&] {{ ::helix::Array<{el}> v; const auto* p = static_cast<const {pt}*>(hxR.data); " +
                         $"for (::helix::i32 i = 0; i < hxR.count; i++) v.Push({item}); return v; }}()");

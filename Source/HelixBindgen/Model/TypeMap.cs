@@ -143,8 +143,8 @@ public sealed class TypeMap
             if (type.Arguments.Count != 1)
                 throw new BindgenException(where, $"{what}: {type.Spelling()} needs one item type");
             Mapping e = Map(type.Arguments[0], where, what);
-            if (!(e.IsBlittable || e.Kind == MapKind.Object))
-                throw new BindgenException(where, $"{what}: arrays of {e.Cs} are not bound (plain values and objects are)");
+            if (!(e.IsBlittable || e.Kind == MapKind.Object || e.Kind == MapKind.String))
+                throw new BindgenException(where, $"{what}: arrays of {e.Cs} are not bound (plain values, strings and objects are)");
             m.Kind = MapKind.Array;
             m.Element = e;
             m.Cs = e.Cs + "[]";

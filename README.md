@@ -42,12 +42,14 @@ private:
   and dynamic types).
 - Members: `HX_FIELD` (a C# property on classes, a field on structs; `ReadOnly`, `NonSerialized`, private ones with
   `SerializeField` are registered for serialization but not in C#), `HX_PROPERTY` on a getter (the setter `Set<Name>`
-  is paired, or `Setter`), `HX_FUNCTION` (overloads, default values, `Out`, references as `ref`, `Constructor` on a
-  static factory, `Generic` on a function taking a type id, `Lists` for `List<T>` overloads of array results, `Leaf`
-  for calls without a GC transition), `HX_EVENT` on an `Event<...>` or `Query<...>` (or a function returning one by
-  reference; `Delegate` names the C# delegate type, `Action` and `Func` otherwise), `Hidden`, `Name`.
+  is paired, or `Setter`; `SetterThrows` for a C# setter that throws NotImplementedException), `HX_FUNCTION`
+  (overloads, default values, `Out`, references as `ref`, `Constructor` on a static factory, `Generic` on a function
+  taking a type id, `Lists` for `List<T>` overloads of array results, `Leaf` for calls without a GC transition, `Void`
+  to drop a result the member does not have), `HX_EVENT` on an `Event<...>` or `Query<...>` (or a function returning
+  one by reference; `Delegate` names the C# delegate type, `Action` and `Func` otherwise), `Hidden`, `Name`.
 - Values: the primitives, `bool`, `String` / `StringView`, enums, structs, objects of root classes (by pointer or
-  reference; ids across), `Array<T>` and `Span<const T>` of values and objects, `scripting::TypeId` (`System.Type`).
+  reference; ids across), `Array<T>` and `Span<const T>` of values, strings and objects, `scripting::TypeId`
+  (`System.Type`).
   A type the table does not know is an error with its place.
 
 ## Calls
@@ -89,9 +91,10 @@ private:
   of its chain (and the API's names for the classes of that chain). Events take a `Callback` and answer a token for
   `Remove`. A failed call is logged and answers the default. A member tagged `Internal` is internal in C# (for C#
   written by hand next to it) and still in the C++ API.
-- Scripts: a class deriving from a class tagged `ScriptBase` (the engine's GameBehaviour) is a script class: its
-  message methods (public or not, no virtual needed) and its methods without arguments or with one bool are
-  registered as a `NativeScriptClass` with function pointers; the tag argument `Order = <n>` is its DefaultExecutionOrder.
+- Scripts: a class deriving from a class tagged `ScriptBase` (the engine's GameBehaviour or ScriptableObject) is a
+  script class: its message methods (public or not, no virtual needed) and its methods without arguments or with one
+  bool are registered as a `NativeScriptClass` with function pointers and the name of its script base; the tag
+  argument `Order = <n>` is its DefaultExecutionOrder.
 - Script fields: each script class gets a transfer function over Helix.Serialization's `DynamicVisitor` with its
   serialized `HX_FIELD` members (its module's script bases' first): public ones and private ones with
   `SerializeField`, not static, const, `ReadOnly` or `NonSerialized`; numbers, bools, enums, `String`, `Array<T>`, the

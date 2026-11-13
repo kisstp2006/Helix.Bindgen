@@ -121,6 +121,22 @@ namespace Helix.Bindgen.Tests
 
             Check(m.Describe("hi ") == "hi runner" && m.Describe("hey ", true) == "hey runner!", "string results and a bool default");
             Check(m.Sum(new[] { 1, 2, 3, 4 }) == 10 && m.Sum(Array.Empty<int>()) == 0 && m.Sum(null) == 0, "a span argument");
+            string[] words = m.Words(3);
+            Check(words.Length == 3 && words[0] == "runner" && words[1] == "runner!" && m.Words(0).Length == 0, "an array of strings out");
+            Check(m.Letters(new[] { "ab", "", "écd" }) == 6 && m.Letters(null) == 0, "an array of strings in");
+            bool threw = false;
+            try
+            {
+                m.laps = 3;
+            }
+            catch (NotImplementedException)
+            {
+                threw = true;
+            }
+            Check(m.laps == 2 && threw, "a setter that throws");
+            m.Relabel("renamed");
+            Check(m.Describe("") == "renamed", "a dropped result");
+            m.Relabel("runner");
 
             IDamageable d = m;
             d.Damage(10);
