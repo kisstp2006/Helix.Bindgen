@@ -109,9 +109,18 @@ public sealed class ApiGenerator
         _c.Line();
         _c.Line("#include <bit>");
         _c.Line("#include <cstddef>");
+        _c.Line("#include <cstring>");
         _c.Line();
         _c.Open("namespace helix::scripting::hxapi");
         _c.Line($"inline constexpr char {_module}[] = \"{_b.Module.Name}\";");
+        _c.Line("// A value in an 8 byte slot of a call with many arguments (its bytes from the first).");
+        _c.Line("template <class T>");
+        _c.Line("inline ::helix::u64 Slot(T value)");
+        _c.Line("{");
+        _c.Line("    ::helix::u64 slot = 0;");
+        _c.Line("    std::memcpy(&slot, &value, sizeof(T));");
+        _c.Line("    return slot;");
+        _c.Line("}");
         _c.Close();
         _c.Line();
 
@@ -683,7 +692,8 @@ public sealed class ApiGenerator
             call.Args.Add("&hxR");
         }
         string fail = returns != null ? $"return {returns};" : apiReturn == "void" ? "return;" : $"return {apiReturn}();";
-        _c.Line($"using HxFn = ::helix::i32 (*)({string.Join(", ", call.Abi)});");
+        bool packed = call.Abi.Count > Shared.MaxThunkParameters;
+        _c.Line($"using HxFn = ::helix::i32 (*)({(packed ? "const ::helix::u64*" : string.Join(", ", call.Abi))});");
         _c.Line($"auto hxFn = std::bit_cast<HxFn>(::helix::scripting::ApiFunction<::helix::scripting::hxapi::{_module}>({th.Index}u));");
         _c.Line($"if (!::helix::scripting::ApiCheck(std::bit_cast<const void*>(hxFn), \"{what}\"))");
         _c.Line($"    {fail}");
@@ -691,7 +701,14 @@ public sealed class ApiGenerator
             _c.Line(l);
         if (decl.Length > 0)
             _c.Line(decl);
-        _c.Line($"if (!::helix::scripting::ApiStatus(hxFn({string.Join(", ", call.Args)}), \"{what}\"))");
+        string callArgs = string.Join(", ", call.Args);
+        if (packed)
+        {
+            // Many arguments go as one array of 8 byte slots (see Shared.MaxThunkParameters).
+            _c.Line($"const ::helix::u64 hxA[] = {{{string.Join(", ", call.Abi.Select((a, i) => $"::helix::scripting::hxapi::Slot<{a}>({call.Args[i]})"))}}};");
+            callArgs = "hxA";
+        }
+        _c.Line($"if (!::helix::scripting::ApiStatus(hxFn({callArgs}), \"{what}\"))");
         _c.Line($"    {fail}");
         foreach (string l in call.Post)
             _c.Line(l);

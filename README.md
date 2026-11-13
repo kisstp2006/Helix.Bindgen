@@ -60,7 +60,8 @@ private:
   a null argument, ...) that C# turns into an exception; results go out through a pointer. Strings go in as UTF-16
   and out as UTF-8 in a per thread buffer; arrays are copied; objects are ids with their dynamic type, wrapped once per
   object. Event handlers are C# delegates held by GC handles; exceptions thrown in them are reported, never thrown
-  into native code.
+  into native code. A thunk of more than six parameters takes them as one array of 8 byte slots (the C# side and the
+  C++ script API fill it), so every call fits the 12 integer slots the Web's interpreter passes.
 - C++ to C#: `helix_bindgen(... ASSEMBLY ... PROXIES ...)` writes a value class per C# class (it holds a GC handle;
   copies hold their own; no pointers), with its constructors (`New`), methods, statics, and its properties and fields
   as members read and written as in C# (`counter.Scale = 2.5f; f32 s = counter.Scale;`). Failed calls are logged and

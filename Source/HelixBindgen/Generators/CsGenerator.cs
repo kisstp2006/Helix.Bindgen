@@ -384,6 +384,8 @@ public sealed class CsGenerator
         abi.AddRange(call.Abi);
         if (hasResult)
             abi.Add(OutAbi(result));
+        if (abi.Count > Shared.MaxThunkParameters)
+            abi = new List<string> { "ulong*" };
         abi.Add("int");
         return $"delegate* unmanaged[Cdecl{(th.Leaf ? ", SuppressGCTransition" : "")}]<{string.Join(", ", abi)}>";
     }
@@ -401,14 +403,30 @@ public sealed class CsGenerator
         if (hasResult)
             _c.Line(decl);
         var args = new List<string>();
+        var types = new List<string>();
         if (!th.Static)
+        {
             args.Add(Self(th));
+            types.Add("ulong");
+        }
         args.AddRange(call.Args);
+        types.AddRange(call.Abi);
         if (hasResult)
+        {
             args.Add("&hx_r");
+            types.Add(OutAbi(result));
+        }
         foreach (string f in call.Fixed)
             _c.Line(f);
         _c.Open();
+        if (args.Count > Shared.MaxThunkParameters)
+        {
+            // Many arguments go as one array of 8 byte slots (see Shared.MaxThunkParameters).
+            _c.Line($"ulong* hx_a = stackalloc ulong[{args.Count}];");
+            for (int i = 0; i < args.Count; i++)
+                _c.Line(types[i].EndsWith('*') ? $"hx_a[{i}] = (ulong)(nuint)({args[i]});" : $"hx_a[{i}] = {ModuleClass}.HxSlot({args[i]});");
+            args = new List<string> { "hx_a" };
+        }
         _c.Line($"int hx_s = {ModuleClass}.{th.Name}({string.Join(", ", args)});");
         foreach (string l in call.Cleanup)
             _c.Line(l);
@@ -1032,6 +1050,8 @@ public sealed class CsGenerator
         _c.Line($"public const string Name = \"{_b.Module.Name}\";");
         _c.Line($"public const ulong Hash = 0x{_b.Hash:x16}ul;");
         _c.Line($"public const int FunctionCount = {_b.Thunks.Count};");
+        _c.Line("/// <summary>A value in an 8 byte slot of a call with many arguments (its bytes from the first).</summary>");
+        _c.Line("internal static ulong HxSlot<T>(T value) where T : unmanaged { ulong r = 0; *(T*)&r = value; return r; }");
         foreach (Thunk th in _b.Thunks)
         {
             // Thunks no member called (base calls of functions C# does not show, makers of C# subclasses that are

@@ -104,6 +104,7 @@ public sealed class CppGenerator
         _c.Line();
         _c.Line("#include <bit>");
         _c.Line("#include <cstddef>");
+        _c.Line("#include <cstring>");
         _c.Line("#include <new>");
         _c.Line("#include <type_traits>");
         _c.Line();
@@ -125,6 +126,14 @@ public sealed class CppGenerator
             WriteScriptTransfers();
         }
         WriteBridge();
+        _c.Line("// A value of an 8 byte slot of a thunk with many parameters (its bytes from the first).");
+        _c.Line("template <class T>");
+        _c.Open("[[maybe_unused]] T HxSlot(u64 slot)");
+        _c.Line("T value;");
+        _c.Line("std::memcpy(&value, &slot, sizeof(T));");
+        _c.Line("return value;");
+        _c.Close();
+        _c.Line();
         foreach (Thunk th in _b.Thunks)
             WriteThunk(th);
         WriteTable();
@@ -779,6 +788,25 @@ public sealed class CppGenerator
 
     string Self(TypeModel t) => $"{Q(t)}* self_o = ObjectFromId<{Q(_b.RootOf(t))}, {Q(t)}>(self);";
 
+    // A thunk's head: its parameters, or with many of them one array of 8 byte slots they are taken from (the C#
+    // side fills it; see Shared.MaxThunkParameters).
+    void OpenThunk(string name, List<string> parameters)
+    {
+        if (parameters.Count <= Shared.MaxThunkParameters)
+        {
+            _c.Open($"i32 {name}({string.Join(", ", parameters)})");
+            return;
+        }
+        _c.Open($"i32 {name}(const u64* hx_a)");
+        for (int i = 0; i < parameters.Count; i++)
+        {
+            string p = parameters[i];
+            int space = p.LastIndexOf(' ');
+            string type = p[..space].Trim(), param = p[(space + 1)..];
+            _c.Line($"{type} {param} = HxSlot<{type}>(hx_a[{i}]);");
+        }
+    }
+
     void WriteThunk(Thunk th)
     {
         TypeModel t = th.Owner;
@@ -900,7 +928,7 @@ public sealed class CppGenerator
                     lines.Add($"delete static_cast<HxHandler{k}*>(handle);");
                     lines.Add("return InteropOk;");
                 }
-                _c.Open($"i32 {th.Name}({string.Join(", ", call.Params)})");
+                OpenThunk(th.Name, call.Params);
                 foreach (string l in lines)
                     _c.Line(l);
                 _c.Close();
@@ -910,7 +938,7 @@ public sealed class CppGenerator
             default:
                 throw new InvalidOperationException();
         }
-        _c.Open($"i32 {th.Name}({string.Join(", ", call.Params)})");
+        OpenThunk(th.Name, call.Params);
         foreach (string l in call.Prep)
             _c.Line(l);
         foreach (string l in body)

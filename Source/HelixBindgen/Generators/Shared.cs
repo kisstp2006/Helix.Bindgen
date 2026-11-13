@@ -3,6 +3,17 @@ using Helix.Bindgen.Model;
 
 namespace Helix.Bindgen.Generators;
 
+/// <summary>What the generators share about the C ABI of thunks.</summary>
+public static class Shared
+{
+    /// <summary>
+    /// The most parameters a thunk takes as they are; one with more takes them as one array of 8 byte slots (each
+    /// value in its first bytes). Mono's WebAssembly interpreter calls native functions with at most 12 integer
+    /// slots, a 64 bit value taking two: six parameters fit whatever their types.
+    /// </summary>
+    public const int MaxThunkParameters = 6;
+}
+
 /// <summary>Lines with indentation.</summary>
 public sealed class Code
 {
