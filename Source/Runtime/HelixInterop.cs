@@ -252,6 +252,13 @@ namespace Helix.Interop
         static readonly Dictionary<Type, Factory> s_ByType = new();
         static readonly ConditionalWeakTable<object, StrongBox<ulong>> s_Ids = new();
 
+        /// <summary>The wrapper functions of the root a registered class belongs to (for other modules' classes deriving from it).</summary>
+        public static RootFunctions RootOf(Type type)
+        {
+            lock (s_ByNative)
+                return s_ByType.TryGetValue(type, out Factory f) ? f.Root : throw new InvalidOperationException($"{type} is not a registered class");
+        }
+
         public static void RegisterFactory(uint nativeType, Type type, Func<ObjectId, object> factory, RootFunctions root)
         {
             var f = new Factory { Type = type, Make = factory, Root = root };

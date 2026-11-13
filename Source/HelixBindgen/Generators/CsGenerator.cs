@@ -143,11 +143,11 @@ public sealed class CsGenerator
                 _c.Line("internal ulong m_HxId;");
                 _c.Line("// An object of a C# class deriving from a generated one: base calls reach the C++ implementation.");
                 _c.Line("internal bool m_HxDerived;");
-                _c.Line("internal " + t.Name + "(global::Helix.Interop.ObjectId id) { m_HxId = id.Value; }");
+                _c.Line(WrapperAccess(t) + " " + t.Name + "(global::Helix.Interop.ObjectId id) { m_HxId = id.Value; }");
                 WriteRootEquality(t);
             }
             else
-                _c.Line("internal " + t.Name + "(global::Helix.Interop.ObjectId id) : base(id) { }");
+                _c.Line(WrapperAccess(t) + " " + t.Name + "(global::Helix.Interop.ObjectId id) : base(id) { }");
             bool zeroArgCtor = t.Methods.Any(m => m.Tag.Has("Constructor") && m.Parameters.Count == 0 && !m.Tag.Has("Hidden"));
             if (!zeroArgCtor)
                 _c.Line($"{(t.Tag.Has("Sealed") ? "private" : "protected")} {t.Name}() {{ }}");
@@ -214,6 +214,10 @@ public sealed class CsGenerator
     }
 
     string Self(Thunk th) => th.Static ? "" : "m_HxId";
+
+    // The wrapper constructor (an object's id): also for the wrappers of other modules' generated classes deriving
+    // from this one (a game module's classes deriving from the engine's), so protected where the class can be derived.
+    static string WrapperAccess(TypeModel t) => t.Tag.Has("Sealed") ? "internal" : "protected internal";
 
     // ------------------------------------------------------------------------------------------- calls
 
@@ -1096,6 +1100,10 @@ public sealed class CsGenerator
         _c.Line("uint* ids = types(&typeCount);");
         _c.Line($"if (typeCount != {ordered.Count})");
         _c.Line($"    throw new global::System.InvalidOperationException(\"{_b.Module.Name}: the native module lists other types\");");
+        // Roots of other modules (the engine's Object for a game module's classes): their wrapper functions as that
+        // module registered them.
+        foreach (TypeModel r in ordered.Where(t => _b.IsObjectClass(t)).Select(t => _b.RootOf(t)).Where(r => !ordered.Contains(r)).Distinct())
+            _c.Line($"var hxRoot_{r.Ident} = global::Helix.Interop.Objects.RootOf(typeof({G(r)}));");
         foreach (TypeModel r in ordered.Where(t => _b.IsObjectClass(t) && _b.RootOf(t) == t))
         {
             Thunk get = _b.Thunks.First(x => x.Owner == r && x.Kind == ThunkKind.GetWrapper);

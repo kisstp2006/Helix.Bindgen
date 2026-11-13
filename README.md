@@ -74,6 +74,9 @@ private:
   C# virtual methods; the object is made as a generated C++ subclass whose overrides call the C# overrides the C#
   class has (found once per class); base calls reach the C++ implementation; pure virtual functions are overridden
   in C# (`new` of the class itself throws).
+- A module's classes deriving from another module's (a game module's from the engine's): their C# wrappers derive
+  from the other module's C# classes (wrapper constructors are protected where a class can be derived) and use that
+  module's root wrapper functions (`Objects.RootOf`).
 - Interfaces: a C++ interface (HX_INTERFACE) taken from C# is a native object that implements it or any C# object
   that does, through a generated adapter; a C# interface given to `PROXIES` is an abstract C++ class, and a C++
   object of it handed to C# arrives as a forwarding object, borrowed for the call.
