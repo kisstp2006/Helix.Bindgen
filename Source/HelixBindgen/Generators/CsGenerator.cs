@@ -537,6 +537,8 @@ public sealed class CsGenerator
             _c.Open($"{Access(m.Tag)} {st}{CsType(th.Type)} {Id(m.CsName)}({ps})");
             Body(th, call, th.Type, what, true);
             _c.Close();
+            if (m.Tag.Has("NativeArrays"))
+                WriteNativeArrayOverload(m, th, st, what);
         }
         if (m.Tag.Has("Lists") && th.Type.Kind == MapKind.Array)
         {
@@ -558,6 +560,39 @@ public sealed class CsGenerator
         string? generic = m.Tag.Get("Generic");
         if (generic != null)
             WriteGeneric(m, th, generic, st);
+    }
+
+    // The internal overload of a NativeArrays function whose arrays of plain values are Helix.Collections.NativeArray<T>:
+    // their memory goes to the C++ span as it is (the core module's containers; a read check in development builds).
+    // Internal: the public NativeArray members of the reference are generic or differ in name, written over these.
+    void WriteNativeArrayOverload(MethodModel m, Thunk th, string st, string what)
+    {
+        var call = new Call();
+        var decls = new List<string>();
+        for (int i = 0; i < m.Parameters.Count; i++)
+        {
+            ParameterModel p = m.Parameters[i];
+            Mapping pm = _b.Map.Map(p.Type, m.Where, p.Name);
+            if (pm.Kind == MapKind.Array && pm.Element!.IsBlittable && !pm.ByRef)
+            {
+                string e = CsValue(pm.Element!);
+                string n = Id(p.Name);
+                call.Pre.Add($"{e}* hx_p{i} = ({e}*)global::Helix.Collections.LowLevel.Unsafe.NativeArrayUnsafeUtility.GetUnsafeReadOnlyPtr({n});");
+                call.Abi.Add($"{e}*");
+                call.Abi.Add("int");
+                call.Args.Add($"hx_p{i}");
+                call.Args.Add($"{n}.Length");
+                decls.Add(ParamDecl(m, p, $"global::Helix.Collections.NativeArray<{e}>"));
+            }
+            else
+            {
+                In(call, pm, Id(p.Name), $"hx_p{i}", IsOut(m, p));
+                decls.Add(ParamDecl(m, p));
+            }
+        }
+        _c.Open($"internal {st}{CsType(th.Type)} {Id(m.CsName)}({string.Join(", ", decls)})");
+        Body(th, call, th.Type, what, true);
+        _c.Close();
     }
 
     Call NewCall(MethodModel m)

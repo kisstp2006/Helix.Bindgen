@@ -44,7 +44,8 @@ private:
   `SerializeField` are registered for serialization but not in C#), `HX_PROPERTY` on a getter (the setter `Set<Name>`
   is paired, or `Setter`; `SetterThrows` for a C# setter that throws NotImplementedException), `HX_FUNCTION`
   (overloads, default values, `Out`, references as `ref`, `Constructor` on a static factory, `Generic` on a function
-  taking a type id, `Lists` for `List<T>` overloads of array results, `Leaf` for calls without a GC transition, `Void`
+  taking a type id, `Lists` for `List<T>` overloads of array results, `NativeArrays` for an internal overload taking
+  `Helix.Collections.NativeArray<T>` for each span of plain values (its memory as it is), `Leaf` for calls without a GC transition, `Void`
   to drop a result the member does not have), `HX_EVENT` on an `Event<...>` or `Query<...>` (or a function returning
   one by reference; `Delegate` names the C# delegate type, `Action` and `Func` otherwise), `Hidden`, `Name`.
 - Values: the primitives, `bool`, `String` / `StringView`, enums, structs, objects of root classes (by pointer or
