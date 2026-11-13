@@ -175,6 +175,14 @@ public sealed class CppGenerator
         _c.Open("struct HxAccess");
         _c.Line("friend typename Tag::Type HxMember(Tag) { return Member; }");
         _c.Close("};");
+        _c.Line("template <class Tag>");
+        _c.Open("struct HxPointerCall");
+        _c.Line("static inline void* (*call)(void*) = nullptr;");
+        _c.Close("};");
+        _c.Line("template <class Tag, class Owner, auto Member>");
+        _c.Open("struct HxPointerAccess");
+        _c.Line("static inline const bool set = (HxPointerCall<Tag>::call = [](void* p) -> void* { return static_cast<void*>((static_cast<Owner*>(p)->*Member)()); }, true);");
+        _c.Close("};");
         foreach ((TypeModel t, FieldModel f) in fields)
         {
             int k = _privateTags.Count;
@@ -191,6 +199,14 @@ public sealed class CppGenerator
             int k = _privateMethods.Count;
             _privateMethods[m] = k;
             string args = m.Parameters.Count == 1 ? "bool" : "";
+            if (ReturnsPointer(m))
+            {
+                // The result type as the class's header writes it is not spelled here: the call is made where the
+                // member is named (its result made a void*) and kept for the tag.
+                _c.Line($"struct HxMTag{k} {{}};");
+                _c.Line($"template struct HxPointerAccess<HxMTag{k}, {Q(owner)}, &{Q(owner)}::{m.Name}>;");
+                continue;
+            }
             _c.Open($"struct HxMTag{k}");
             _c.Line($"using Type = void ({Q(owner)}::*)({args}){(m.Const ? " const" : "")};");
             _c.Line($"friend Type HxMember(HxMTag{k});");
@@ -201,6 +217,8 @@ public sealed class CppGenerator
     }
 
     readonly Dictionary<MethodModel, int> _privateMethods = new();
+
+    static bool ReturnsPointer(MethodModel m) => m.Return.Pointers > 0;
 
     // The script classes of the module: how they are made and copied, and their methods without arguments or with one
     // bool (the engine finds its messages among them).
@@ -218,9 +236,17 @@ public sealed class CppGenerator
             {
                 string self = $"static_cast<{q}*>(static_cast<{root}*>(p))";
                 string call = _privateMethods.TryGetValue(m, out int pk) ? $"({self}->*HxMember(HxMTag{pk}{{}}))" : $"{self}->{m.Name}";
-                _c.Line(m.Parameters.Count == 0
-                    ? $"NativeScriptMethod{{\"{m.Name}\", [](void* p) {{ {call}(); }}, nullptr}},"
-                    : $"NativeScriptMethod{{\"{m.Name}\", nullptr, [](void* p, bool v) {{ {call}(v); }}}},");
+                if (ReturnsPointer(m))
+                {
+                    string result = _privateMethods.TryGetValue(m, out int rk)
+                        ? $"HxPointerCall<HxMTag{rk}>::call(static_cast<{Q(owner)}*>({self}))"
+                        : $"static_cast<void*>({self}->{m.Name}())";
+                    _c.Line($"NativeScriptMethod{{\"{m.Name}\", nullptr, nullptr, [](void* p) -> void* {{ return {result}; }}, \"{m.Return.Name.Split("::")[^1]}\"}},");
+                }
+                else
+                    _c.Line(m.Parameters.Count == 0
+                        ? $"NativeScriptMethod{{\"{m.Name}\", [](void* p) {{ {call}(); }}, nullptr}},"
+                        : $"NativeScriptMethod{{\"{m.Name}\", nullptr, [](void* p, bool v) {{ {call}(v); }}}},");
             }
             if (methods.Count == 0)
                 _c.Line("NativeScriptMethod{},");

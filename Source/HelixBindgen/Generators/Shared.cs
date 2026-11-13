@@ -165,8 +165,15 @@ public sealed class Binding
                 break;
             foreach (MethodModel m in c.Methods.Concat(c.Untagged))
             {
-                if (m.Static || m.RealConstructor || m.Return.Name != "void" || m.Return.Pointers != 0)
+                if (m.Static || m.RealConstructor || m.Return.Reference)
                     continue;
+                // A pointer result: a factory without arguments (the engine checks the pointee's name).
+                if (m.Return.Name != "void" || m.Return.Pointers != 0)
+                {
+                    if (m.Return.Pointers == 1 && m.Parameters.Count == 0 && seen.Add(m.Name + "/0"))
+                        list.Add((m, c));
+                    continue;
+                }
                 bool boolArg = m.Parameters.Count == 1 && m.Parameters[0].Type.Name == "bool" && m.Parameters[0].Type.Pointers == 0 && !m.Parameters[0].Type.Reference;
                 if (m.Parameters.Count != 0 && !boolArg)
                     continue;

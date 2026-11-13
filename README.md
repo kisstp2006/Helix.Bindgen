@@ -97,9 +97,10 @@ private:
   `Remove`. A failed call is logged and answers the default. A member tagged `Internal` is internal in C# (for C#
   written by hand next to it) and still in the C++ API.
 - Scripts: a class deriving from a class tagged `ScriptBase` (the engine's GameBehaviour or ScriptableObject) is a
-  script class: its message methods (public or not, no virtual needed) and its methods without arguments or with one
-  bool are registered as a `NativeScriptClass` with function pointers and the name of its script base; the tag
-  argument `Order = <n>` is its DefaultExecutionOrder.
+  script class: its message methods (public or not, no virtual needed), its methods without arguments or with one
+  bool, and its methods without arguments that answer a pointer (the pointee's name goes with them: the engine takes
+  a pipeline asset's `RenderPipeline* CreatePipeline()` so) are registered as a `NativeScriptClass` with function
+  pointers and the name of its script base; the tag argument `Order = <n>` is its DefaultExecutionOrder.
 - Script fields: each script class gets a transfer function over Helix.Serialization's `DynamicVisitor` with its
   serialized `HX_FIELD` members (its module's script bases' first): public ones and private ones with
   `SerializeField`, not static, const, `ReadOnly` or `NonSerialized`; numbers, bools, enums, `String`, `Array<T>`, the
