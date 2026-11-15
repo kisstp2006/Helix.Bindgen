@@ -31,6 +31,23 @@ public sealed class CppGenerator
     // ------------------------------------------------------------------------------------------- C++ spellings
 
     static string Q(TypeModel t) => "::" + t.CppName;
+
+    // A field's type: a reference wrapper (or an Array of them) by its alias, else as Spell writes it.
+    string FieldSpell(TypeModel owner, FieldModel f)
+    {
+        string ns = owner.CppName[..owner.CppName.LastIndexOf("::", StringComparison.Ordinal)];
+        string? Alias(TypeRef type)
+        {
+            int k = _referenceAliases.FindIndex(a => a.Namespace == ns && a.Written == type.Spelling());
+            return k < 0 ? null : $"::{ns}::{_referenceAliases[k].Alias}";
+        }
+        if (_b.ReferenceWrapper(f.Type) != null && Alias(f.Type) is string alias)
+            return alias;
+        if (f.Type.Name.Split("::")[^1] == "Array" && f.Type.Arguments.Count == 1 && _b.ReferenceWrapper(f.Type.Arguments[0]) != null &&
+            Alias(f.Type.Arguments[0]) is string element)
+            return $"::helix::Array<{element}>";
+        return Spell(f.Type, f.Where, f.Name);
+    }
     // The value handle of a class in the C++ script API.
     static string Handle(TypeModel t) => "::" + t.CsFullName.Replace(".", "::");
 
@@ -109,6 +126,11 @@ public sealed class CppGenerator
         _c.Line("#include <type_traits>");
         _c.Line();
         WriteLayoutChecks();
+        // The reference wrappers of serialized fields, spelled where their classes are declared.
+        foreach ((string ns, string alias, string written) in _referenceAliases)
+            _c.Line($"namespace {ns} {{ using {alias} = {written}; }}");
+        if (_referenceAliases.Count > 0)
+            _c.Line();
         _c.Open("namespace");
         _c.Line("using namespace ::helix;");
         _c.Line("using namespace ::helix::scripting;");
@@ -188,7 +210,7 @@ public sealed class CppGenerator
             int k = _privateTags.Count;
             _privateTags[f] = k;
             _c.Open($"struct HxTag{k}");
-            _c.Line($"using Type = {Spell(f.Type, f.Where, f.Name)} ({Q(t)}::*);");
+            _c.Line($"using Type = {FieldSpell(t, f)} ({Q(t)}::*);");
             _c.Line($"friend Type HxMember(HxTag{k});");
             _c.Close("};");
             _c.Line($"template struct HxAccess<HxTag{k}, &{Q(t)}::{f.Name}>;");
@@ -256,15 +278,29 @@ public sealed class CppGenerator
             _c.Line($"c.module = \"{_b.Module.Name}\";");
             _c.Line($"c.nameSpace = \"{t.CsNamespace}\";");
             _c.Line($"c.name = \"{t.RegistryName}\";");
-            _c.Line($"c.scriptBase = \"{_b.BaseChain(t).Skip(1).First(b => b.Tag.Has("ScriptBase")).RegistryName}\";");
+            // The nearest base the engine knows as a class: a script base, or a script class (of this module or another).
+            _c.Line($"c.scriptBase = \"{_b.BaseChain(t).Skip(1).First(b => b.Tag.Has("ScriptBase") || _b.IsScriptClassOfAnyModule(b)).RegistryName}\";");
             _c.Line($"c.size = u32(sizeof({q}));");
             _c.Line($"c.alignment = u32(alignof({q}));");
-            _c.Line($"c.construct = [](void* m) -> void* {{ return static_cast<{root}*>(new (m) {q}()); }};");
-            _c.Line($"c.clone = [](void* m, const void* o) -> void* {{ return static_cast<{root}*>(new (m) {q}(*static_cast<const {q}*>(static_cast<const {root}*>(o)))); }};");
+            // A class abstract in C++ is made only as the derived class of the C# script classes below it.
+            if (!_b.Overridables.ContainsKey(t))
+                _c.Line($"static_assert(!std::is_abstract_v<{q}>, \"{t.Name}: a script class abstract in C++ needs tagged virtual functions (C# classes below it implement them)\");");
+            _c.Line($"c.construct = HxScriptConstruct<{q}, {root}>();");
+            _c.Line($"c.clone = HxScriptClone<{q}, {root}>();");
             _c.Line($"c.methods = Span<const NativeScriptMethod>(methods, {methods.Count}u);");
             _c.Line($"c.executionOrder = {(int.TryParse(t.Tag.Get("Order"), out int order) ? order : 0)};");
             if (_transfers.Contains(t))
                 _c.Line($"c.transfer = &HxTransfer_{t.Ident};");
+            if (_b.Overridables.ContainsKey(t))
+            {
+                // Objects of C# script classes deriving from it: every virtual call goes to the C# object, which calls
+                // the C++ implementation where its class does not override.
+                string d = Derived(t);
+                _c.Line($"c.derivedSize = u32(sizeof({d}));");
+                _c.Line($"c.derivedAlignment = u32(alignof({d}));");
+                _c.Line($"c.constructDerived = [](void* m) -> void* {{ auto* o = new (m) {d}(); o->hxMask = ~u64(0); return static_cast<{root}*>(o); }};");
+                _c.Line($"c.cloneDerived = [](void* m, const void* o) -> void* {{ return static_cast<{root}*>(new (m) {d}(*static_cast<const {d}*>(static_cast<const {q}*>(static_cast<const {root}*>(o))))); }};");
+            }
             _c.Line("RegisterNativeScriptClass(c);");
             _c.Close();
         }
@@ -276,7 +312,11 @@ public sealed class CppGenerator
     // fields hold (by value, in arrays, inside each other), and the C++ types of their object references.
     readonly List<TypeModel> _transfers = new();
     readonly List<TypeModel> _serializedStructs = new();
-    readonly Dictionary<string, (TypeModel Bound, bool IsHandle)> _references = new();
+    // Kind 0 a pointer, 1 a value handle, 2 a wrapper of the object's pointer (a class template of one object class:
+    // Get() and a constructor from the pointer, an engine's PPtr<T>), spelled by an alias in the namespace of the
+    // class declaring the field, where its spelling resolves as in the header.
+    readonly Dictionary<string, (TypeModel Bound, int Kind)> _references = new();
+    readonly List<(string Namespace, string Alias, string Written)> _referenceAliases = new();
 
     // The script class and its bases of this module below the script base, the base first.
     List<TypeModel> OwnScriptChain(TypeModel t) =>
@@ -287,37 +327,50 @@ public sealed class CppGenerator
         foreach (TypeModel t in _b.Ordered().Where(_b.IsScriptClass))
         {
             foreach (FieldModel f in t.Fields.Where(Binding.IsSerialized))
-                CollectFieldType(f.Type, f.Where, $"{t.Name}.{f.Name}");
+                CollectFieldType(f.Type, f.Where, $"{t.Name}.{f.Name}", t);
             if (OwnScriptChain(t).Any(c => c.Fields.Any(Binding.IsSerialized)))
                 _transfers.Add(t);
         }
     }
 
-    void CollectFieldType(TypeRef type, Location where, string what)
+    void CollectFieldType(TypeRef type, Location where, string what, TypeModel? owner = null)
     {
         if (_b.ValueHandle(type) is TypeModel handle)
         {
-            _references.TryAdd(Handle(handle), (handle, true));
+            _references.TryAdd(Handle(handle), (handle, 1));
             return;
         }
         string last = type.Name.Split("::")[^1];
         if (last == "Array" && type.Arguments.Count == 1)
         {
-            CollectFieldType(type.Arguments[0], where, what);
+            CollectFieldType(type.Arguments[0], where, what, owner);
+            return;
+        }
+        if (owner != null && _b.ReferenceWrapper(type) is TypeModel target)
+        {
+            string ns = owner.CppName[..owner.CppName.LastIndexOf("::", StringComparison.Ordinal)];
+            string written = type.Spelling();
+            int known = _referenceAliases.FindIndex(a => a.Namespace == ns && a.Written == written);
+            if (known < 0)
+            {
+                known = _referenceAliases.Count;
+                _referenceAliases.Add((ns, $"HxRef_{known}", written));
+            }
+            _references.TryAdd($"::{ns}::HxRef_{known}", (target, 2));
             return;
         }
         Mapping m = _b.Map.Map(type, where, what);
         switch (m.Kind)
         {
             case MapKind.Object when type.Pointers == 1 && !type.Reference:
-                _references.TryAdd(Q(m.Bound!) + "*", (m.Bound!, false));
+                _references.TryAdd(Q(m.Bound!) + "*", (m.Bound!, 0));
                 break;
             case MapKind.Struct when type.Pointers == 0 && !type.Reference:
                 if (!m.Bound!.External && !_serializedStructs.Contains(m.Bound))
                 {
                     _serializedStructs.Add(m.Bound);
                     foreach (FieldModel f in m.Bound.Fields.Where(Binding.IsSerialized))
-                        CollectFieldType(f.Type, f.Where, $"{m.Bound.Name}.{f.Name}");
+                        CollectFieldType(f.Type, f.Where, $"{m.Bound.Name}.{f.Name}", m.Bound);
                 }
                 break;
             case MapKind.Primitive or MapKind.Bool or MapKind.Enum:
@@ -333,20 +386,28 @@ public sealed class CppGenerator
     void WriteSerializationTraits()
     {
         _c.Open("namespace helix::serialization");
-        foreach ((string spelling, (TypeModel bound, bool isHandle)) in _references)
+        foreach ((string spelling, (TypeModel bound, int kind)) in _references)
         {
             string root = Q(_b.RootOf(bound));
-            string type = isHandle ? $"{spelling}::HxType()" : $"::helix::scripting::TypeOf<{Q(bound)}>()";
+            string type = kind == 1 ? $"{spelling}::HxType()" : $"::helix::scripting::TypeOf<{Q(bound)}>()";
             _c.Line("template <>");
             _c.Open($"struct ObjectReferenceTraits<{spelling}>");
             _c.Line($"using T = {spelling};");
-            _c.Line(isHandle
-                ? "static ::helix::u64 Id(const T& o) { return o.HxId(); }"
-                : $"static ::helix::u64 Id(const T& o) {{ return o ? ::helix::scripting::ObjectHandles<{root}>::ToId(o) : 0; }}");
+            _c.Line(kind switch
+            {
+                1 => "static ::helix::u64 Id(const T& o) { return o.HxId(); }",
+                2 => $"static ::helix::u64 Id(const T& o) {{ return o.Get() ? ::helix::scripting::ObjectHandles<{root}>::ToId(o.Get()) : 0; }}",
+                _ => $"static ::helix::u64 Id(const T& o) {{ return o ? ::helix::scripting::ObjectHandles<{root}>::ToId(o) : 0; }}",
+            });
             _c.Open("static void Set(T& o, ::helix::u64 id)");
             _c.Line($"{root}* r = id ? ::helix::scripting::ObjectHandles<{root}>::FromId(id) : nullptr;");
             _c.Line($"bool fits = r && ::helix::scripting::IsAssignableFrom({type}, ::helix::scripting::ObjectHandles<{root}>::TypeOf(r));");
-            _c.Line(isHandle ? "o = T::HxFromId(fits ? id : 0);" : $"o = fits ? static_cast<{Q(bound)}*>(r) : nullptr;");
+            _c.Line(kind switch
+            {
+                1 => "o = T::HxFromId(fits ? id : 0);",
+                2 => $"o = T(fits ? static_cast<{Q(bound)}*>(r) : nullptr);",
+                _ => $"o = fits ? static_cast<{Q(bound)}*>(r) : nullptr;",
+            });
             _c.Close();
             _c.Close("};");
         }
@@ -529,6 +590,23 @@ public sealed class CppGenerator
         _c.Line("template <class T>");
         _c.Line("[[maybe_unused]] T HxDefault() { return T(); }");
         _c.Line();
+        _c.Line("// The construct and clone functions of a script class: null for a class abstract in C++ (its overrides of tagged");
+        _c.Line("// pure virtual functions may be untagged, so only the compiler knows).");
+        _c.Line("template <class T, class Root>");
+        _c.Open("[[maybe_unused]] void* (*HxScriptConstruct())(void*)");
+        _c.Line("if constexpr (std::is_abstract_v<T>)");
+        _c.Line("    return nullptr;");
+        _c.Line("else");
+        _c.Line("    return [](void* m) -> void* { return static_cast<Root*>(new (m) T()); };");
+        _c.Close();
+        _c.Line("template <class T, class Root>");
+        _c.Open("[[maybe_unused]] void* (*HxScriptClone())(void*, const void*)");
+        _c.Line("if constexpr (std::is_abstract_v<T>)");
+        _c.Line("    return nullptr;");
+        _c.Line("else");
+        _c.Line("    return [](void* m, const void* o) -> void* { return static_cast<Root*>(new (m) T(*static_cast<const T*>(static_cast<const Root*>(o)))); };");
+        _c.Close();
+        _c.Line();
         _c.Line("// A type of the module: the one it has (declared by the module's own registry), else a new one.");
         _c.Open("TypeId HxDeclare(ModuleId module, StringView nameSpace, StringView name, TypeKind kind, TypeId base, u32 flags)");
         _c.Line("String full(nameSpace);");
@@ -603,9 +681,10 @@ public sealed class CppGenerator
                 string baseCall = o.Pure ? $"return HxDefault<{Spell(m.Return.Bare(), m.Where, m.Name)}>();" : $"return {Q(o.NearestOwner)}::{m.Name}({ArgList(m)});";
                 _c.Line();
                 _c.Open(Signature(m, m.Name) + " override");
-                _c.Line($"if (!(hxMask & (u64(1) << {o.Bit})))");
-                _c.Line($"    {baseCall}");
+                // Before its C# object is attached (a script object being made) the C++ implementation runs.
                 _c.Line($"u64 handle = ObjectHandles<{root}>::WrapperOf(const_cast<{Derived(t)}*>(this));");
+                _c.Line($"if (!(hxMask & (u64(1) << {o.Bit})) || !handle)");
+                _c.Line($"    {baseCall}");
                 ManagedCall(m, "handle", o.Export.Index, $"{t.Name}.{m.CsName}", baseCall);
                 _c.Close();
                 _c.Open(Signature(m, "HxBase_" + m.Name));

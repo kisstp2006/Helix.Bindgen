@@ -73,7 +73,8 @@ private:
 - C# classes deriving from C++ classes (a class with a tagged C++ constructor): its tagged virtual functions are
   C# virtual methods; the object is made as a generated C++ subclass whose overrides call the C# overrides the C#
   class has (found once per class); base calls reach the C++ implementation; pure virtual functions are overridden
-  in C# (`new` of the class itself throws).
+  in C# (`new` of the class itself throws). A virtual getter tagged `HX_PROPERTY` without a setter is a C# virtual
+  property C# classes override the same way (with a setter it is a plain property).
 - A module's classes deriving from another module's (a game module's from the engine's): their C# wrappers derive
   from the other module's C# classes (wrapper constructors are protected where a class can be derived) and use that
   module's root wrapper functions (`Objects.RootOf`).
@@ -100,14 +101,20 @@ private:
   script class: its message methods (public or not, no virtual needed), its methods without arguments or with one
   bool, and its methods without arguments that answer a pointer (the pointee's name goes with them: the engine takes
   a pipeline asset's `RenderPipeline* CreatePipeline()` so) are registered as a `NativeScriptClass` with function
-  pointers and the name of its script base; the tag argument `Order = <n>` is its DefaultExecutionOrder.
+  pointers and the name of its script base; the tag argument `Order = <n>` is its DefaultExecutionOrder. Its base
+  is the nearest script class (of this module or another one) or script base. A script class with tagged virtual
+  functions also carries its generated C++ subclass, which the engine makes the objects of C# script classes below
+  it as; a class the compiler finds abstract has no construct function (only the C# classes below it are made), and
+  one that declares a pure virtual function has a protected C# constructor (others the public one C# scripts have).
+  Generated C# of another assembly reaches the objects' ids through the interop interface `INativeObject`.
 - Script fields: each script class gets a transfer function over Helix.Serialization's `DynamicVisitor` with its
   serialized `HX_FIELD` members (its module's script bases' first): public ones and private ones with
   `SerializeField`, not static, const, `ReadOnly` or `NonSerialized`; numbers, bools, enums, `String`, `Array<T>`, the
   module's `HX_STRUCT`s (their `TransferTraits` are generated; a member `Transfer` wins), types with `TransferTraits`
   of the headers the module includes, and object references: pointers to objects of root classes and value handles
   of the C++ script API (`HelixEngine::GameObject other;`), checked against the field's type when read. Fields C#
-  does not reach through the bindings (value handles, arrays of them and of strings) are serialized and left out of C#.
+  does not reach through the bindings (value handles, reference wrappers such as `PPtr<T>`, arrays of them and of
+  strings) are serialized and left out of C#.
 
 Release, Ryzen 7 3750H, the sample module (its id lookup is a list search):
 

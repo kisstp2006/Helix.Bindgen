@@ -64,6 +64,14 @@ namespace helix::sample
         return total;
     }
 
+    i32 Thing::TotalRank()
+    {
+        i32 total = 0;
+        for (Thing* t : Things())
+            total += t->rank();
+        return total;
+    }
+
     String Thing::GreetAll(StringView to)
     {
         String all;

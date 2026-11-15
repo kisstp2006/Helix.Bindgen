@@ -85,9 +85,14 @@ public sealed class Binding
 
     public static string Key(MethodModel m) => m.Name + "(" + string.Join(",", m.Parameters.Select(p => p.Type.Spelling())) + ")" + (m.Const ? "const" : "");
 
-    /// <summary>A class C# may derive from: objects cross as ids, not sealed, with a tagged C++ constructor.</summary>
+    /// <summary>A class C# may derive from: objects cross as ids, not sealed, with a tagged C++ constructor, or a script
+    /// class with tagged virtual functions (its engine makes the objects of C# script classes deriving from it).</summary>
     public bool IsDerivable(TypeModel t) =>
-        !t.External && t.Kind == TypeKind.Class && IsObjectClass(t) && !t.Tag.Has("Sealed") && t.Methods.Any(m => m.RealConstructor && !m.Tag.Has("Hidden"));
+        !t.External && t.Kind == TypeKind.Class && IsObjectClass(t) && !t.Tag.Has("Sealed") &&
+        (t.Methods.Any(m => m.RealConstructor && !m.Tag.Has("Hidden")) || (IsScriptClass(t) && ChainVirtuals(t).Count > 0));
+
+    /// <summary>The class declares a tagged pure virtual function itself (it is abstract in C++).</summary>
+    public bool DeclaresPure(TypeModel t) => t.Methods.Any(m => m.Virtual && m.Abstract && !m.Tag.Has("Hidden"));
 
     /// <summary>Tagged pure virtual functions without a nearer C++ implementation (the class is abstract in C++).</summary>
     public bool IsAbstractCpp(TypeModel t) => t.Tag.Has("Abstract") || ChainVirtuals(t).Any(o => o.Pure);
@@ -99,7 +104,8 @@ public sealed class Binding
         var list = new List<Overridable>();
         var byKey = new Dictionary<string, Overridable>();
         foreach (TypeModel c in BaseChain(t))
-            foreach (MethodModel m in c.Methods.Where(m => m.Virtual && !m.Static && !m.Tag.Has("Hidden")))
+            foreach ((MethodModel m, PropertyModel? p) in c.Methods.Where(m => m.Virtual && !m.Static && !m.Tag.Has("Hidden")).Select(m => (m, (PropertyModel?)null))
+                         .Concat(c.Properties.Where(IsVirtualProperty).Select(p => (p.Getter, (PropertyModel?)p))))
             {
                 string key = Key(m);
                 if (byKey.TryGetValue(key, out Overridable? o))
@@ -108,7 +114,7 @@ public sealed class Binding
                     o.Declarer = c;
                     continue;
                 }
-                o = new Overridable { Nearest = m, NearestOwner = c, First = m, Declarer = c, Pure = m.Abstract };
+                o = new Overridable { Nearest = m, NearestOwner = c, First = m, Declarer = c, Pure = m.Abstract, Property = p };
                 byKey[key] = o;
                 list.Add(o);
             }
@@ -116,6 +122,10 @@ public sealed class Binding
             list[i].Bit = i;
         return list;
     }
+
+    /// <summary>A property C# classes override: a virtual getter tagged HX_PROPERTY without a setter (one with a setter is
+    /// a plain C# property, its getter virtual for C++ only).</summary>
+    public static bool IsVirtualProperty(PropertyModel p) => p.Getter.Virtual && !p.Static && p.Setter == null && !p.Getter.Tag.Has("Hidden");
 
     /// <summary>Where C# declares a virtual function first: the overridable of the method's own class.</summary>
     public bool IsFirstDeclaration(TypeModel owner, MethodModel m) => ChainVirtuals(owner).Any(o => o.First == m);
@@ -137,10 +147,31 @@ public sealed class Binding
     public bool HoldsValueHandle(TypeRef type) =>
         ValueHandle(type) != null || (type.Name.Split("::")[^1] == "Array" && type.Arguments.Count == 1 && ValueHandle(type.Arguments[0]) != null);
 
-    /// <summary>A field type files hold that C# does not reach through the bindings: value handles, arrays of them and
-    /// of strings.</summary>
+    /// <summary>A wrapper of a reference to an object (a class template of one object class with Get() and a constructor
+    /// from the object's pointer, an engine's PPtr<T>): the object class (null for other types).</summary>
+    public TypeModel? ReferenceWrapper(TypeRef type)
+    {
+        if (type.Arguments.Count != 1 || type.Pointers != 0 || type.Reference || type.Name.Split("::")[^1] == "Array")
+            return null;
+        TypeRef a = type.Arguments[0];
+        if (a.Arguments.Count != 0 || a.Pointers != 0)
+            return null;
+        try
+        {
+            Mapping m = Map.Map(new TypeRef { Name = a.Name, Pointers = 1 }, new Location(), a.Name);
+            return m.Kind == MapKind.Object ? m.Bound : null;
+        }
+        catch (BindgenException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>A field type files hold that C# does not reach through the bindings: value handles, reference wrappers,
+    /// arrays of them and of strings.</summary>
     public bool SerializedOnly(TypeRef type) =>
-        HoldsValueHandle(type) ||
+        HoldsValueHandle(type) || ReferenceWrapper(type) != null ||
+        (type.Name.Split("::")[^1] == "Array" && type.Arguments.Count == 1 && ReferenceWrapper(type.Arguments[0]) != null) ||
         (type.Name.Split("::")[^1] == "Array" && type.Arguments.Count == 1 && type.Arguments[0].Name.Split("::")[^1] == "String" && type.Arguments[0].Pointers == 0);
 
     /// <summary>A field files hold: not static, const or ReadOnly, not NonSerialized; a private one (C++ private, or
@@ -149,8 +180,11 @@ public sealed class Binding
         !f.Static && !f.Type.Const && !f.Tag.Has("ReadOnly") && !f.Tag.Has("NonSerialized") && (!f.Tag.Has("Private") || f.Tag.Has("SerializeField"));
 
     /// <summary>A class of the module deriving from a script base class (HX_CLASS(ScriptBase)), made by its engine.</summary>
-    public bool IsScriptClass(TypeModel t) =>
-        !t.External && t.Kind == TypeKind.Class && IsObjectClass(t) && !t.Tag.Has("ScriptBase") && !t.Tag.Has("Abstract") &&
+    public bool IsScriptClass(TypeModel t) => !t.External && IsScriptClassOfAnyModule(t);
+
+    /// <summary>A script class of this module or of another one (a base the engine registered as a class).</summary>
+    public bool IsScriptClassOfAnyModule(TypeModel t) =>
+        t.Kind == TypeKind.Class && IsObjectClass(t) && !t.Tag.Has("ScriptBase") && !t.Tag.Has("Abstract") &&
         BaseChain(t).Skip(1).Any(b => b.Tag.Has("ScriptBase"));
 
     /// <summary>The methods of a script class an engine may call: no arguments or one bool, returning nothing, of the
@@ -161,7 +195,8 @@ public sealed class Binding
         var seen = new HashSet<string>();
         foreach (TypeModel c in BaseChain(t))
         {
-            if (c.Tag.Has("ScriptBase"))
+            // Another module's script class: the engine gives its messages to the classes deriving from it.
+            if (c.Tag.Has("ScriptBase") || c.External)
                 break;
             foreach (MethodModel m in c.Methods.Concat(c.Untagged))
             {
@@ -200,7 +235,8 @@ public sealed class Binding
             {
                 if (!_virtualExports.TryGetValue(o.First, out ManagedEntry? e))
                 {
-                    e = new ManagedEntry { Kind = ExportKind.Virtual, Method = o.First, Owner = o.Declarer, Name = $"HxVirtual_{o.Declarer.Ident}_{o.First.Name}" };
+                    e = new ManagedEntry { Kind = ExportKind.Virtual, Method = o.First, Owner = o.Declarer, Name = $"HxVirtual_{o.Declarer.Ident}_{o.First.Name}",
+                                           Property = o.Property };
                     _virtualExports[o.First] = e;
                     Managed.Add(e);
                 }
@@ -415,6 +451,8 @@ public sealed class ManagedEntry
     public int Index;
     public MethodModel? Method;
     public TypeModel? Owner;
+    /// <summary>A virtual property's getter: C# reads the property.</summary>
+    public PropertyModel? Property;
 }
 
 /// <summary>A virtual function a C# class deriving from a class may override.</summary>
@@ -426,6 +464,8 @@ public sealed class Overridable
     public TypeModel Declarer = new();
     public bool Pure;
     public int Bit;
+    /// <summary>A virtual getter tagged HX_PROPERTY: C# overrides the property.</summary>
+    public PropertyModel? Property;
     public ManagedEntry Export = new();
 }
 

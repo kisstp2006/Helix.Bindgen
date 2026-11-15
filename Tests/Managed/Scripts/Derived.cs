@@ -13,6 +13,8 @@ namespace Scripts
 
         public override int Weight() => base.Weight() * 2 + 1;
 
+        public override int rank => base.rank + 100;
+
         public override void OnHit(int damage)
         {
             hits += damage;

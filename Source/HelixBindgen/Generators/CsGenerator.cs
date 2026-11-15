@@ -143,14 +143,18 @@ public sealed class CsGenerator
                 _c.Line("internal ulong m_HxId;");
                 _c.Line("// An object of a C# class deriving from a generated one: base calls reach the C++ implementation.");
                 _c.Line("internal bool m_HxDerived;");
+                _c.Line("ulong global::Helix.Interop.INativeObject.HxId { get => m_HxId; set => m_HxId = value; }");
+                _c.Line("bool global::Helix.Interop.INativeObject.HxDerived { get => m_HxDerived; set => m_HxDerived = value; }");
                 _c.Line(WrapperAccess(t) + " " + t.Name + "(global::Helix.Interop.ObjectId id) { m_HxId = id.Value; }");
                 WriteRootEquality(t);
             }
             else
                 _c.Line(WrapperAccess(t) + " " + t.Name + "(global::Helix.Interop.ObjectId id) : base(id) { }");
             bool zeroArgCtor = t.Methods.Any(m => m.Tag.Has("Constructor") && m.Parameters.Count == 0 && !m.Tag.Has("Hidden"));
+            // A script class has the public constructor C# script classes have (the engine makes its objects); one that
+            // declares pure virtual functions a protected one (only the classes below it are made).
             if (!zeroArgCtor)
-                _c.Line($"{(t.Tag.Has("Sealed") ? "private" : "protected")} {t.Name}() {{ }}");
+                _c.Line($"{(_b.IsScriptClass(t) && !_b.DeclaresPure(t) ? "public" : t.Tag.Has("Sealed") ? "private" : "protected")} {t.Name}() {{ }}");
         }
         foreach (Thunk th in _b.Thunks.Where(x => x.Owner == t))
             WriteMember(t, th);
@@ -210,10 +214,19 @@ public sealed class CsGenerator
         if (b != null)
             list.Add(G(b));
         list.AddRange(_b.InterfacesOf(t).Select(G));
+        if (_b.IsObjectClass(t) && _b.RootOf(t) == t)
+            list.Add("global::Helix.Interop.INativeObject");
         return list.Count == 0 ? "" : " : " + string.Join(", ", list);
     }
 
-    string Self(Thunk th) => th.Static ? "" : "m_HxId";
+    // The id and the derived mark of an object: its root's fields, or through the interop interface when the root is
+    // another module's (the engine's for a game module: its fields are internal to its assembly).
+    bool ForeignRoot(TypeModel t) => _b.RootOf(t).External;
+    string IdOf(TypeModel t, string expr) => ForeignRoot(t) ? $"((global::Helix.Interop.INativeObject){expr}).HxId" : $"(({G(_b.RootOf(t))}){expr}).m_HxId";
+    string SelfId(TypeModel t) => ForeignRoot(t) ? "((global::Helix.Interop.INativeObject)this).HxId" : "m_HxId";
+    string SelfDerived(TypeModel t) => ForeignRoot(t) ? "((global::Helix.Interop.INativeObject)this).HxDerived" : "m_HxDerived";
+
+    string Self(Thunk th) => th.Static ? "" : SelfId(th.Owner!);
 
     // The wrapper constructor (an object's id): also for the wrappers of other modules' generated classes deriving
     // from this one (a game module's classes deriving from the engine's), so protected where the class can be derived.
@@ -321,7 +334,7 @@ public sealed class CsGenerator
                 break;
             case MapKind.Object:
                 call.Abi.Add("ulong");
-                call.Args.Add($"{n} is null ? 0ul : (({Root(m)}){n}).m_HxId");
+                call.Args.Add($"{n} is null ? 0ul : {IdOf(m.Bound!, n)}");
                 break;
             case MapKind.Interface:
                 // A native wrapper crosses as its object; any other C# object as a GC handle for the call.
@@ -346,7 +359,7 @@ public sealed class CsGenerator
                 }
                 else if (e.Kind == MapKind.Object)
                 {
-                    call.Pre.Add($"ulong[] {local}_ids = global::Helix.Interop.Objects.Ids({n}, x => (({Root(e)})x).m_HxId);");
+                    call.Pre.Add($"ulong[] {local}_ids = global::Helix.Interop.Objects.Ids({n}, x => {IdOf(e.Bound!, "x")});");
                     call.Fixed.Add($"fixed (ulong* {local} = {local}_ids)");
                     call.Abi.Add("ulong*");
                 }
@@ -479,6 +492,29 @@ public sealed class CsGenerator
                 PropertyModel p = th.Property;
                 Thunk? set = _b.Thunks.FirstOrDefault(x => x.Property == p && x.IsSetter);
                 Attributes(p.Getter.Tag);
+                if (Binding.IsVirtualProperty(p))
+                {
+                    // A virtual property: C# classes deriving from a derivable class override it (as a virtual function).
+                    _c.Open($"public {(_b.IsFirstDeclaration(t, p.Getter) ? "virtual" : "override")} {CsType(th.Type)} {Id(p.CsName)}");
+                    _c.Open("get");
+                    if (_b.Overridables.ContainsKey(t))
+                    {
+                        Thunk baseCall = _b.Thunks.First(x => x.Owner == t && x.Kind == ThunkKind.BaseCall && Binding.Key(x.Method!) == Binding.Key(p.Getter));
+                        _c.Open($"if ({SelfDerived(t)})");
+                        Body(baseCall, new Call(), th.Type, $"{t.Name}.{p.CsName}", true);
+                        _c.Close();
+                        _c.Open("else");
+                        Body(th, new Call(), th.Type, $"{t.Name}.{p.CsName}", true);
+                        _c.Close();
+                    }
+                    else
+                        Body(th, new Call(), th.Type, $"{t.Name}.{p.CsName}", true);
+                    _c.Close();
+                    if (p.Getter.Tag.Has("SetterThrows"))
+                        _c.Line("set => throw new global::System.NotImplementedException();");
+                    _c.Close();
+                    return;
+                }
                 _c.Open($"{Access(p.Getter.Tag)} {st}{CsType(th.Type)} {Id(p.CsName)}");
                 _c.Open("get");
                 Body(th, new Call(), th.Type, $"{t.Name}.{p.CsName}", true);
@@ -543,7 +579,7 @@ public sealed class CsGenerator
             {
                 // An object of a C# class deriving from this one: base calls reach the C++ implementation.
                 Thunk baseCall = _b.Thunks.First(x => x.Owner == t && x.Kind == ThunkKind.BaseCall && Binding.Key(x.Method!) == Binding.Key(m));
-                _c.Open("if (m_HxDerived)");
+                _c.Open($"if ({SelfDerived(t)})");
                 Body(baseCall, NewCall(m), th.Type, what, true);
                 _c.Close();
                 _c.Open("else");
@@ -641,7 +677,7 @@ public sealed class CsGenerator
         else
         {
             Body(th!, NewCall(m), th!.Type, what, false);
-            _c.Line("m_HxId = hx_r.id;");
+            _c.Line($"{SelfId(t)} = hx_r.id;");
             _c.Line($"global::Helix.Interop.Objects.Attach(this, hx_r.id, typeof({g}));");
             _c.Line("return;");
         }
@@ -663,8 +699,8 @@ public sealed class CsGenerator
         call.Cleanup.Add("    hx_self.Free();");
         _c.Open();
         Body(derived, call, derived.Type, what, false);
-        _c.Line("m_HxId = hx_r.id;");
-        _c.Line("m_HxDerived = true;");
+        _c.Line($"{SelfId(t)} = hx_r.id;");
+        _c.Line($"{SelfDerived(t)} = true;");
         _c.Line("global::Helix.Interop.Objects.Remember(this, hx_r.id);");
         _c.Close();
         _c.Close();
@@ -681,9 +717,21 @@ public sealed class CsGenerator
             MethodModel m = o.Nearest;
             Thunk baseCall = _b.Thunks.First(x => x.Owner == t && x.Kind == ThunkKind.BaseCall && x.Virtual == o);
             Mapping r = baseCall.Type;
+            if (o.Property != null)
+            {
+                _c.Open($"public override {CsType(r)} {Id(o.Property.CsName)}");
+                _c.Open("get");
+                _c.Open($"if ({SelfDerived(t)})");
+                Body(baseCall, new Call(), r, $"{t.Name}.{o.Property.CsName}", true);
+                _c.Close();
+                _c.Line($"return base.{Id(o.Property.CsName)};");
+                _c.Close();
+                _c.Close();
+                continue;
+            }
             string ps = string.Join(", ", m.Parameters.Select(p => ParamDecl(m, p)));
             _c.Open($"public override {CsType(r)} {Id(m.CsName)}({ps})");
-            _c.Open("if (m_HxDerived)");
+            _c.Open($"if ({SelfDerived(t)})");
             Body(baseCall, NewCall(m), r, $"{t.Name}.{m.CsName}", true);
             _c.Close();
             _c.Open("else");
@@ -897,7 +945,7 @@ public sealed class CsGenerator
         _events[e] = k;
         EventAbi a = EventSignature(t, e);
         string del = DelegateType(e, a);
-        string self = add.Static ? "0ul" : "m_HxId";
+        string self = add.Static ? "0ul" : SelfId(t);
         string callbackFn = $"delegate* unmanaged[Cdecl]<global::System.IntPtr{string.Join("", a.Abi.Select(x => ", " + x))}, {(e.Query ? "byte" : "void")}>";
         string what = $"{t.Name}.{e.CsName}";
         Attributes(e.Tag);
@@ -908,7 +956,7 @@ public sealed class CsGenerator
         _c.Line("var hx_gc = global::System.Runtime.InteropServices.GCHandle.Alloc(value);");
         _c.Line("uint hx_id;");
         _c.Line("void* hx_h;");
-        string selfArg = add.Static ? "" : "m_HxId, ";
+        string selfArg = add.Static ? "" : SelfId(t) + ", ";
         _c.Line($"int hx_s = {ModuleClass}.{add.Name}({selfArg}(void*)({callbackFn})&{ModuleClass}.HxOn{k}, " +
                 "(void*)global::System.Runtime.InteropServices.GCHandle.ToIntPtr(hx_gc), &hx_id, &hx_h);");
         _c.Open("if (hx_s != 0)");
@@ -987,7 +1035,7 @@ public sealed class CsGenerator
             }
             abi.Add("int");
             _exportTypes[e] = $"delegate* unmanaged[Cdecl]<{string.Join(", ", abi)}>";
-            string call = $"hx_o.{Id(m.CsName)}({string.Join(", ", a.Values)})";
+            string call = e.Property != null ? $"hx_o.{Id(e.Property.CsName)}" : $"hx_o.{Id(m.CsName)}({string.Join(", ", a.Values)})";
             _c.Line("[global::System.Runtime.InteropServices.UnmanagedCallersOnly(CallConvs = new[] { typeof(global::System.Runtime.CompilerServices.CallConvCdecl) })]");
             _c.Open($"internal static int {e.Name}({string.Join(", ", ps)})");
             _c.Open("try");
@@ -1029,6 +1077,13 @@ public sealed class CsGenerator
             foreach (Overridable o in virtuals)
             {
                 MethodModel m = o.Nearest;
+                if (o.Property != null)
+                {
+                    // A property's getter, found as a method.
+                    _c.Line($"if (global::Helix.Interop.Types.Overrides(type, \"get_{o.Property.CsName}\", global::System.Type.EmptyTypes))");
+                    _c.Line($"    mask |= 1ul << {o.Bit};");
+                    continue;
+                }
                 string types = string.Join(", ", m.Parameters.Select(p =>
                 {
                     Mapping pm = _b.Map.Map(p.Type, m.Where, p.Name);

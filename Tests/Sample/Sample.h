@@ -75,6 +75,9 @@ namespace helix::sample
         HX_FUNCTION() virtual i32 Weight() const { return 1; }
         HX_FUNCTION() virtual String Greeting(StringView to) const;
         HX_FUNCTION() static i32 TotalWeight();
+        // A virtual property C# classes override.
+        HX_PROPERTY() virtual i32 rank() const { return 1; }
+        HX_FUNCTION() static i32 TotalRank();
         HX_FUNCTION() static String GreetAll(StringView to);
 
         u64 Id() const { return id_; }
@@ -132,6 +135,7 @@ namespace helix::sample
         HX_FUNCTION(Void) bool Relabel(StringView value);
         HX_FUNCTION() void Damage(i32 amount) override;
         HX_FUNCTION() i32 Weight() const override { return 10; }
+        HX_PROPERTY() i32 rank() const override { return 4; }
         HX_FUNCTION() virtual void OnHit(i32 damage) { health -= damage; }
         HX_FUNCTION() void TakeHit(i32 damage) { OnHit(damage); }
         // Interfaces from C#: a native object that implements one, or a C# object.

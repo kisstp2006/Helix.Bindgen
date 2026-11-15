@@ -235,6 +235,17 @@ namespace Helix.Interop
     }
 
     /// <summary>
+    /// A wrapper of a native object as the generated code of other assemblies reaches it (a game module's classes
+    /// deriving from the engine's): its id and whether it is an object of a C# class deriving from a generated one.
+    /// The generated root classes implement it explicitly.
+    /// </summary>
+    public interface INativeObject
+    {
+        ulong HxId { get; set; }
+        bool HxDerived { get; set; }
+    }
+
+    /// <summary>
     /// The wrappers of native objects: one per native object, its GC handle in the object's wrapper slot (weak for
     /// wrappers made here, which hold nothing of their own; strong for objects of C# classes deriving from generated
     /// ones, set by the native side when it makes them), made by the factory of the object's dynamic type.
