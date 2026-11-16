@@ -154,6 +154,9 @@ public sealed class ApiGenerator
             {
                 if (th.Kind is not (ThunkKind.Method or ThunkKind.FieldGet or ThunkKind.FieldSet))
                     continue;
+                // Classes bound by hand to C# are not in the C++ script API (C++ uses the class itself).
+                if (th.Type.Kind == MapKind.Handle)
+                    continue;
                 if (!Usable(th))
                     continue;
                 string key = Key(th);

@@ -49,6 +49,7 @@ public sealed class CsGenerator
         MapKind.Primitive => m.Cs,
         MapKind.String => "string",
         MapKind.TypeId => "global::System.Type",
+        MapKind.Handle => m.Cs,
         MapKind.Array => CsType(m.Element!) + "[]",
         _ => G(m.Bound!),
     };
@@ -61,6 +62,7 @@ public sealed class CsGenerator
     {
         MapKind.Bool => "byte*",
         MapKind.TypeId => "uint*",
+        MapKind.Handle => "ulong*",
         MapKind.String => "global::Helix.Interop.InteropString*",
         MapKind.Object => "global::Helix.Interop.InteropObject*",
         MapKind.Array => "global::Helix.Interop.InteropArray*",
@@ -146,6 +148,18 @@ public sealed class CsGenerator
                 _c.Line("ulong global::Helix.Interop.INativeObject.HxId { get => m_HxId; set => m_HxId = value; }");
                 _c.Line("bool global::Helix.Interop.INativeObject.HxDerived { get => m_HxDerived; set => m_HxDerived = value; }");
                 _c.Line(WrapperAccess(t) + " " + t.Name + "(global::Helix.Interop.ObjectId id) { m_HxId = id.Value; }");
+                if (t.Tag.Has("Owned"))
+                {
+                    Thunk delete = _b.Thunks.First(x => x.Owner == t && x.Kind == ThunkKind.Delete);
+                    _fnTypes[delete] = "delegate* unmanaged[Cdecl]<ulong, int>";
+                    _c.Line("// The native object a C# constructor made: deleted when this object is collected.");
+                    _c.Line("internal bool m_HxOwned;");
+                    _c.Line("bool global::Helix.Interop.INativeObject.HxOwned { get => m_HxOwned; set => m_HxOwned = value; }");
+                    _c.Open($"~{t.Name}()");
+                    _c.Line("if (m_HxOwned && m_HxId != 0)");
+                    _c.Line($"    {ModuleClass}.{delete.Name}(m_HxId);");
+                    _c.Close();
+                }
                 WriteRootEquality(t);
             }
             else
@@ -211,7 +225,12 @@ public sealed class CsGenerator
     {
         var list = new List<string>();
         TypeModel? b = _b.BaseOf(t);
-        if (b != null)
+        // A C# base of the class's own (HX_CLASS(CSharpBase = ...)): a hand written class below the C++ base's C# class
+        // that takes the wrapper's id (RenderPipelineAsset for a C++ pipeline asset).
+        string? csharpBase = t.Tag.Get("CSharpBase");
+        if (csharpBase != null)
+            list.Add("global::" + csharpBase);
+        else if (b != null)
             list.Add(G(b));
         list.AddRange(_b.InterfacesOf(t).Select(G));
         if (_b.IsObjectClass(t) && _b.RootOf(t) == t)
@@ -225,6 +244,7 @@ public sealed class CsGenerator
     string IdOf(TypeModel t, string expr) => ForeignRoot(t) ? $"((global::Helix.Interop.INativeObject){expr}).HxId" : $"(({G(_b.RootOf(t))}){expr}).m_HxId";
     string SelfId(TypeModel t) => ForeignRoot(t) ? "((global::Helix.Interop.INativeObject)this).HxId" : "m_HxId";
     string SelfDerived(TypeModel t) => ForeignRoot(t) ? "((global::Helix.Interop.INativeObject)this).HxDerived" : "m_HxDerived";
+    string SelfOwned(TypeModel t) => ForeignRoot(t) ? "((global::Helix.Interop.INativeObject)this).HxOwned" : "m_HxOwned";
 
     string Self(Thunk th) => th.Static ? "" : SelfId(th.Owner!);
 
@@ -383,6 +403,7 @@ public sealed class CsGenerator
     {
         MapKind.Bool => ("byte hx_r;", "hx_r != 0"),
         MapKind.TypeId => ("uint hx_r;", "global::Helix.Interop.Types.FromNative(hx_r)"),
+        MapKind.Handle => ("ulong hx_r;", $"global::Helix.Interop.Handles.Of<{m.Cs}>(hx_r)"),
         MapKind.String => ("global::Helix.Interop.InteropString hx_r;", "global::Helix.Interop.Native.ReadString(hx_r)"),
         MapKind.Object => ("global::Helix.Interop.InteropObject hx_r;", $"global::Helix.Interop.Objects.Wrap<{CsType(m)}>(hx_r)"),
         MapKind.Array => m.Element!.Kind == MapKind.Object
@@ -543,6 +564,7 @@ public sealed class CsGenerator
             case ThunkKind.GetWrapper:
             case ThunkKind.SetWrapper:
             case ThunkKind.Alive:
+            case ThunkKind.Delete:
             case ThunkKind.NewDerived:
             case ThunkKind.BaseCall:
                 return;
@@ -679,6 +701,8 @@ public sealed class CsGenerator
             Body(th!, NewCall(m), th!.Type, what, false);
             _c.Line($"{SelfId(t)} = hx_r.id;");
             _c.Line($"global::Helix.Interop.Objects.Attach(this, hx_r.id, typeof({g}));");
+            if (_b.IsOwned(t))
+                _c.Line($"{SelfOwned(t)} = true;");
             _c.Line("return;");
         }
         _c.Close();
@@ -692,7 +716,10 @@ public sealed class CsGenerator
         Call call = NewCall(m);
         call.Abi.Add("ulong");
         call.Abi.Add("ulong");
-        call.Pre.Add("var hx_self = global::System.Runtime.InteropServices.GCHandle.Alloc(this);");
+        // An owned object's C# object may be collected (it deletes the native one): a weak handle.
+        call.Pre.Add(_b.IsOwned(t)
+            ? "var hx_self = global::System.Runtime.InteropServices.GCHandle.Alloc(this, global::System.Runtime.InteropServices.GCHandleType.Weak);"
+            : "var hx_self = global::System.Runtime.InteropServices.GCHandle.Alloc(this);");
         call.Args.Add("(ulong)global::System.Runtime.InteropServices.GCHandle.ToIntPtr(hx_self)");
         call.Args.Add($"{ModuleClass}.HxMask_{t.Ident}(GetType())");
         call.Cleanup.Add("if (hx_s != 0)");
@@ -701,6 +728,8 @@ public sealed class CsGenerator
         Body(derived, call, derived.Type, what, false);
         _c.Line($"{SelfId(t)} = hx_r.id;");
         _c.Line($"{SelfDerived(t)} = true;");
+        if (_b.IsOwned(t))
+            _c.Line($"{SelfOwned(t)} = true;");
         _c.Line("global::Helix.Interop.Objects.Remember(this, hx_r.id);");
         _c.Close();
         _c.Close();
@@ -1009,7 +1038,7 @@ public sealed class CsGenerator
     void WriteExports()
     {
         const string gch = "global::System.Runtime.InteropServices.GCHandle";
-        foreach (ManagedEntry e in _b.Managed.Where(e => e.Kind != ExportKind.Release))
+        foreach (ManagedEntry e in _b.Managed.Where(e => e.Kind != ExportKind.Release && e.Kind != ExportKind.Retain))
         {
             MethodModel m = e.Method!;
             string what = $"{e.Owner!.Name}.{m.CsName}";
@@ -1177,9 +1206,9 @@ public sealed class CsGenerator
         _c.Line($"var setManaged = (delegate* unmanaged[Cdecl]<void**, uint, ulong, byte>)export(\"HxBindings_{ModuleIdent}_SetManaged\");");
         _c.Line($"void** managed = (void**)global::System.Runtime.InteropServices.NativeMemory.Alloc((nuint)({_b.Managed.Count} * sizeof(void*)));");
         foreach (ManagedEntry e in _b.Managed)
-            _c.Line(e.Kind == ExportKind.Release
-                ? $"managed[{e.Index}] = (void*)(delegate* unmanaged[Cdecl]<ulong, void>)&global::Helix.Interop.Objects.ReleaseHandle;"
-                : $"managed[{e.Index}] = (void*)({_exportTypes[e]})&{e.Name};");
+            _c.Line(e.Kind == ExportKind.Release ? $"managed[{e.Index}] = (void*)(delegate* unmanaged[Cdecl]<ulong, void>)&global::Helix.Interop.Objects.ReleaseHandle;"
+                    : e.Kind == ExportKind.Retain ? $"managed[{e.Index}] = (void*)(delegate* unmanaged[Cdecl]<ulong, ulong>)&global::Helix.Interop.Objects.RetainHandle;"
+                                                  : $"managed[{e.Index}] = (void*)({_exportTypes[e]})&{e.Name};");
         _c.Line($"if (setManaged == null || setManaged(managed, {_b.Managed.Count}u, Hash) == 0)");
         _c.Line($"    throw new global::System.InvalidOperationException(\"{_b.Module.Name}: the native module takes no C# functions of this build\");");
         foreach (TypeModel t in ordered.Where(t => t.Kind == TypeKind.Struct))

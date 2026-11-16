@@ -14,6 +14,9 @@ public enum MapKind
     TypeId,
     // A C++ interface (HX_INTERFACE): a native object that implements it, or a C# object through an adapter.
     Interface,
+    // A class bound by hand (HX_HANDLE): a field of it crosses as its Id(), C# answers the C# object of that id
+    // (Helix.Interop.Handles).
+    Handle,
 }
 
 /// <summary>What a C++ type is on both sides: its kind, its C# type, and for arrays the element's mapping.</summary>
@@ -62,9 +65,11 @@ public sealed class TypeMap
     static readonly HashSet<string> TypeIds = new() { "TypeId", "scripting::TypeId" };
 
     readonly Dictionary<string, TypeModel> _byName = new();
+    readonly Dictionary<string, string> _handles;
 
     public TypeMap(ModuleModel module)
     {
+        _handles = module.Handles;
         foreach (TypeModel t in module.Types)
         {
             _byName[t.Name] = t;
@@ -149,6 +154,16 @@ public sealed class TypeMap
             m.Element = e;
             m.Cs = e.Cs + "[]";
             m.CppBare = type.Bare().Spelling();
+            return m;
+        }
+        if ((_handles.TryGetValue(name, out string? handle) || _handles.TryGetValue(last, out handle)) && type.Arguments.Count == 0)
+        {
+            if (type.Pointers != 0 || type.Reference)
+                throw new BindgenException(where, $"{what}: a {type.Spelling()} (HX_HANDLE) is bound as a field by value");
+            m.Kind = MapKind.Handle;
+            m.Cs = "global::" + handle;
+            m.CppBare = type.Name;
+            m.Size = m.Align = 8;
             return m;
         }
         TypeModel? bound = Find(type.Name);

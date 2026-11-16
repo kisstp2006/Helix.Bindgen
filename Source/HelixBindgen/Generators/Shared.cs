@@ -167,10 +167,22 @@ public sealed class Binding
         }
     }
 
+    /// <summary>The qualified C++ name of a struct only files hold (HX_STRUCT(SerializedOnly)), else null.</summary>
+    public string? SerializedOnlyName(TypeRef type)
+    {
+        if (type.Pointers != 0 || type.Reference)
+            return null;
+        string name = type.Name.StartsWith("helix::", StringComparison.Ordinal) ? type.Name["helix::".Length..] : type.Name;
+        if (Module.SerializedOnly.TryGetValue(name, out string? q) || Module.SerializedOnly.TryGetValue(name.Split("::")[^1], out q))
+            return q;
+        return null;
+    }
+
     /// <summary>A field type files hold that C# does not reach through the bindings: value handles, reference wrappers,
     /// arrays of them and of strings.</summary>
     public bool SerializedOnly(TypeRef type) =>
         HoldsValueHandle(type) || ReferenceWrapper(type) != null ||
+        (type.Pointers == 0 && !type.Reference && SerializedOnlyName(type) != null) ||
         (type.Name.Split("::")[^1] == "Array" && type.Arguments.Count == 1 && ReferenceWrapper(type.Arguments[0]) != null) ||
         (type.Name.Split("::")[^1] == "Array" && type.Arguments.Count == 1 && type.Arguments[0].Name.Split("::")[^1] == "String" && type.Arguments[0].Pointers == 0);
 
@@ -225,6 +237,7 @@ public sealed class Binding
     void CollectBridge()
     {
         Managed.Add(new ManagedEntry { Kind = ExportKind.Release, Name = "HxReleaseHandle" });
+        Managed.Add(new ManagedEntry { Kind = ExportKind.Retain, Name = "HxRetainHandle" });
         foreach (TypeModel t in Module.Types.Where(IsDerivable))
         {
             List<Overridable> list = ChainVirtuals(t);
@@ -275,6 +288,9 @@ public sealed class Binding
     public TypeModel? BaseOf(TypeModel t) => t.Bases.Select(b => Map.Find(b)).FirstOrDefault(b => b != null && b.Kind == TypeKind.Class);
     public IEnumerable<TypeModel> InterfacesOf(TypeModel t) => t.Bases.Select(b => Map.Find(b)).Where(b => b != null && b.Kind == TypeKind.Interface)!;
 
+    // Objects of the class that C# makes are owned by their C# object (its root is HX_CLASS(Root, Owned)).
+    public bool IsOwned(TypeModel t) => IsObjectClass(t) && RootOf(t).Tag.Has("Owned");
+
     TypeModel? FindRoot(TypeModel t) => t.Kind == TypeKind.Class ? BaseChain(t).LastOrDefault(b => b.Tag.Has("Root")) : null;
 
     /// <summary>A class whose objects cross the boundary (it has a Root among its bases).</summary>
@@ -323,7 +339,7 @@ public sealed class Binding
             {
                 Mapping m = Map.Map(f.Type, f.Where, $"{t.Name}.{f.Name}");
                 Thunks.Add(new Thunk { Kind = ThunkKind.FieldGet, Owner = t, Field = f, Type = m, Name = Name("get_" + f.Name), Static = f.Static });
-                if (!f.Type.Const && !f.Tag.Has("ReadOnly"))
+                if (!f.Type.Const && !f.Tag.Has("ReadOnly") && m.Kind != MapKind.Handle)
                     Thunks.Add(new Thunk { Kind = ThunkKind.FieldSet, Owner = t, Field = f, Type = m, Name = Name("set_" + f.Name), Static = f.Static });
             }
             foreach (PropertyModel p in t.Properties.Where(p => !p.Getter.Tag.Has("Hidden")))
@@ -347,6 +363,8 @@ public sealed class Binding
                 Thunks.Add(new Thunk { Kind = ThunkKind.GetWrapper, Owner = t, Name = Name("HxGetWrapper") });
                 Thunks.Add(new Thunk { Kind = ThunkKind.SetWrapper, Owner = t, Name = Name("HxSetWrapper") });
                 Thunks.Add(new Thunk { Kind = ThunkKind.Alive, Owner = t, Name = Name("HxAlive") });
+                if (t.Tag.Has("Owned"))
+                    Thunks.Add(new Thunk { Kind = ThunkKind.Delete, Owner = t, Name = Name("HxDelete") });
             }
             if (Overridables.TryGetValue(t, out List<Overridable>? virtuals))
             {
@@ -430,6 +448,9 @@ public enum ThunkKind
     GetWrapper,
     SetWrapper,
     Alive,
+    // The deletion of an object its C# object owned (an owned root's, HX_CLASS(Root, Owned)): queued for the main
+    // thread, as the C# finalizer calls it.
+    Delete,
     // An object of a C# class that derives from the class, and the C++ implementation of a virtual function for
     // the C# class's base calls.
     NewDerived,
@@ -439,6 +460,7 @@ public enum ThunkKind
 public enum ExportKind
 {
     Release,
+    Retain,
     Virtual,
     Interface,
 }

@@ -151,6 +151,12 @@ public sealed class ModuleModel
     public string Name = "";
     public List<TypeModel> Types = new();
     public List<string> Headers = new();
+    /// <summary>C++ classes bound by hand to C# classes (HX_HANDLE): their C++ names to their C# types. Their objects
+    /// cross as the u64 of their Id(); a field of one is a C# property answering the C# object of that id.</summary>
+    public Dictionary<string, string> Handles = new();
+    /// <summary>Structs only files hold (HX_STRUCT(SerializedOnly)): not bound; fields of them are serialized through
+    /// their member Transfer and left out of C#. Their C++ names (bare and qualified).</summary>
+    public Dictionary<string, string> SerializedOnly = new();
 }
 
 /// <summary>An error with its place.</summary>

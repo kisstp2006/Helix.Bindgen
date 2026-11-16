@@ -52,7 +52,7 @@ HX_TEST(Bindings, TypesAreRegistered)
     HX_CHECK(GetType(TypeOf<Layers>())->element == TypeOf<u8>());
     u32 count = 0;
     const u32* ids = HxBindings_Sample_Types(&count);
-    HX_CHECK(count == 10);
+    HX_CHECK(count == 12);
     bool all = true;
     for (u32 i = 0; i < count; i++)
         all = all && GetType(TypeId{ids[i]}) != nullptr;
@@ -80,6 +80,8 @@ HX_TEST(Bindings, FieldsByOffsetAndByAccessor)
     HX_CHECK(!(secret->flags & MemberPublic) && (secret->flags & MemberSerialized) && secret->offset != kNoOffset);
     HX_CHECK(GetField(*secret, m, v, error) && v.AsInt() == 7);
     HX_CHECK(SetField(*secret, m, Variant::From(i32(9)), error) && m->Secret() == 9);
+    // A field of a struct only files hold: not a field of the registry.
+    HX_CHECK(FindField(mover, "blob_") == nullptr);
 
     // An object field by accessors: the dynamic type comes back.
     const FieldInfo* target = FindField(mover, "target");

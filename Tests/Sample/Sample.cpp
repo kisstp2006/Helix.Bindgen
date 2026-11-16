@@ -93,6 +93,8 @@ namespace helix::sample
 
     scripting::TypeId Shape::HelixType() const { return scripting::TypeOf<Shape>(); }
 
+    scripting::TypeId Car::HelixType() const { return scripting::TypeOf<Car>(); }
+
     f32 Shape::TotalArea()
     {
         f32 total = 0;
@@ -284,6 +286,73 @@ namespace helix::sample
     }
 
     bool World::Quit() { return wantsToQuit().Ask(); }
+
+    namespace
+    {
+        struct Tickets
+        {
+            Array<Ticket*> all;
+            u64 next = 0;
+            Ticket* held = nullptr;
+            u64 heldHandle = 0;
+        };
+
+        Tickets& T()
+        {
+            static Tickets t;
+            return t;
+        }
+    }
+
+    Ticket::Ticket(i32 number) : number_(number), id_(++T().next) { T().all.Push(this); }
+
+    Ticket::~Ticket()
+    {
+        Tickets& t = T();
+        if (t.held == this)
+        {
+            t.held = nullptr;
+            scripting::ReleaseWrapper(t.heldHandle);
+        }
+        scripting::ReleaseWrapper(wrapper_);
+        for (u32 i = 0; i < t.all.Size(); i++)
+            if (t.all[i] == this)
+            {
+                t.all.RemoveAt(i);
+                break;
+            }
+    }
+
+    Ticket* Ticket::Find(u64 id)
+    {
+        for (Ticket* t : T().all)
+            if (t->id_ == id)
+                return t;
+        return nullptr;
+    }
+
+    i32 Ticket::Count() { return i32(T().all.Size()); }
+
+    void Ticket::Hold(Ticket* ticket)
+    {
+        LetGo();
+        T().held = ticket;
+        T().heldHandle = ticket ? scripting::RetainWrapper(ticket->wrapper_) : 0;
+    }
+
+    void Ticket::LetGo()
+    {
+        T().held = nullptr;
+        scripting::ReleaseWrapper(T().heldHandle);
+    }
+
+    void Ticket::DeleteHeld() { delete T().held; }
+
+    i32 Ticket::HeldPrice() { return T().held ? T().held->Price() : -1; }
+
+    void Ticket::Collect() { scripting::ReleaseCollected(); }
+
+    scripting::TypeId Ticket::HelixType() const { return scripting::TypeOf<Ticket>(); }
 }
 
 helix::sample::Thing* helix::scripting::ObjectHandles<helix::sample::Thing>::FromId(u64 id)

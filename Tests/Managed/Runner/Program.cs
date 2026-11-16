@@ -55,6 +55,7 @@ namespace Helix.Bindgen.Tests
             Destroyed();
             Identity();
             Derived();
+            Owned();
             Interfaces();
             Proxies(export);
 
@@ -310,6 +311,8 @@ namespace Helix.Bindgen.Tests
             Check(Thing.TotalWeight() == 21, "C++ calls the C# override, which calls the C++ base");
             Check(Thing.GreetAll("ann") == "yo ann;", "an override with a string argument and result");
             Check(r.Weight() == 21 && r.Greeting("bo") == "yo bo", "C# calls of the overrides");
+            Sample.Badge.Register();
+            Check(r.badge != null && r.BadgeNumber(r.badge.id) == 9 && r.BadgeNumber(0) == -1, "a field of a class bound by hand is its C# object");
             Check(Thing.TotalRank() == 104 && r.rank == 104, "C++ reads a C# override of a virtual property, which reads the C++ base");
             var plain = new Scripts.Plain();
             Check(Thing.TotalWeight() == 31 && plain.Weight() == 10 && plain.Greeting("x") == "hi x", "without overrides C++ calls stay in C++");
@@ -321,11 +324,63 @@ namespace Helix.Bindgen.Tests
             var circle = new Scripts.Circle("circle", 2);
             Check(Shape.TotalArea() == 12 && ReferenceEquals(Thing.Find("circle"), circle), "C++ calls the C# implementation of a pure virtual function");
 
+            var car = new Car("car");
+            Check(car is Sample.Vehicle v && v.Wheels == 4 && ReferenceEquals(Thing.Find("car"), car), "a bound class below a C# base written by hand");
+            car.Destroy();
+
             r.Destroy();
             Check(r == null && r.hits == 5, "a destroyed derived object is null, its C# state still readable");
             plain.Destroy();
             circle.Destroy();
             Check(Thing.Count() == 0, "the derived objects are gone");
+        }
+
+        // Objects of an owned root (HX_CLASS(Root, Owned)): deleted after their C# objects are collected, unless C++
+        // retained them; deleted by C++ first, their collected C# objects delete nothing.
+        static void Owned()
+        {
+            MakeTickets();
+            Collect();
+            Check(Ticket.Count() == 3, "collected owned objects wait for ReleaseCollected");
+            Ticket.Collect();
+            Check(Ticket.Count() == 1 && Ticket.HeldPrice() == 33, "the dropped ones are deleted, the retained one lives with its C# override");
+            Ticket.LetGo();
+            Collect();
+            Ticket.Collect();
+            Check(Ticket.Count() == 0 && Ticket.HeldPrice() == -1, "let go and collected, it is deleted");
+            HoldAndDelete();
+            Collect();
+            Ticket.Collect();
+            Check(Ticket.Count() == 0, "deleted by C++ first, its collected C# object deletes nothing");
+            var kept = new Scripts.Fare(5, 1);
+            Collect();
+            Ticket.Collect();
+            Check(Ticket.Count() == 1 && kept.Price() == 11 && kept.number == 5, "a referenced owned object lives");
+            GC.KeepAlive(kept);
+        }
+
+        static void Collect()
+        {
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+        }
+
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        static void MakeTickets()
+        {
+            _ = new Ticket(1);
+            _ = new Scripts.Fare(2, 5);
+            Ticket.Hold(new Scripts.Fare(3, 23));
+        }
+
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        static void HoldAndDelete()
+        {
+            var t = new Ticket(4);
+            Ticket.Hold(t);
+            Ticket.DeleteHeld();
+            Check(t == null && Ticket.Count() == 0, "an owned object C++ deleted is null in C#");
         }
 
         static void MakeRunner()

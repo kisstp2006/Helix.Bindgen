@@ -9,7 +9,7 @@ namespace Helix.Bindgen.Cpp;
 /// </summary>
 public sealed class Parser
 {
-    static readonly HashSet<string> Tags = new() { "HX_CLASS", "HX_STRUCT", "HX_INTERFACE", "HX_ENUM", "HX_FIELD", "HX_PROPERTY", "HX_FUNCTION", "HX_EVENT" };
+    static readonly HashSet<string> Tags = new() { "HX_CLASS", "HX_STRUCT", "HX_INTERFACE", "HX_ENUM", "HX_FIELD", "HX_PROPERTY", "HX_FUNCTION", "HX_EVENT", "HX_HANDLE" };
 
     readonly List<Token> _t;
     readonly string _file;
@@ -130,6 +130,7 @@ public sealed class Parser
                     case "HX_STRUCT": ParseRecord(TypeKind.Struct, args, owner, where); break;
                     case "HX_INTERFACE": ParseRecord(TypeKind.Interface, args, owner, where); break;
                     case "HX_ENUM": ParseEnum(args, owner, where); break;
+                    case "HX_HANDLE": ParseHandle(args, where); break;
                     case "HX_FIELD":
                     case "HX_PROPERTY":
                     case "HX_FUNCTION":
@@ -239,6 +240,30 @@ public sealed class Parser
 
     string CppNamespace() => string.Join("::", _namespaces);
 
+    // HX_HANDLE(CSharp = "Namespace.Type") before a class, struct or alias: its name and C# type; the declaration itself
+    // is not read.
+    void ParseHandle(TagArgs args, Location where)
+    {
+        string cs = args.Get("CSharp") ?? throw new BindgenException(where, "HX_HANDLE needs CSharp = \"<C# type>\"");
+        int start = _pos;
+        if (Peek().Is("class") || Peek().Is("struct"))
+        {
+            _pos++;
+            SkipAttributes();
+        }
+        else if (Peek().Is("using"))
+            _pos++;
+        else
+            throw Error("class, struct or using expected after HX_HANDLE");
+        string name = Identifier();
+        _pos = start;
+        SkipDeclaration();
+        string ns = CppNamespace();
+        _module.Handles[name] = cs;
+        if (ns.Length > 0)
+            _module.Handles[ns + "::" + name] = cs;
+    }
+
     void ParseRecord(TypeKind kind, TagArgs args, TypeModel? outer, Location where)
     {
         if (!(Peek().Is("class") || Peek().Is("struct")))
@@ -283,6 +308,13 @@ public sealed class Parser
         PairProperties(type);
         if (_untagged.TryGetValue(type, out var others))
             type.Untagged.AddRange(others);
+        if (type.Tag.Has("SerializedOnly"))
+        {
+            string qualified = "::" + type.CppName;
+            _module.SerializedOnly[type.Name] = qualified;
+            _module.SerializedOnly[type.CppName] = qualified;
+            return;
+        }
         _module.Types.Add(type);
     }
 

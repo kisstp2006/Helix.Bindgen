@@ -46,6 +46,8 @@ public sealed class CppGenerator
         if (f.Type.Name.Split("::")[^1] == "Array" && f.Type.Arguments.Count == 1 && _b.ReferenceWrapper(f.Type.Arguments[0]) != null &&
             Alias(f.Type.Arguments[0]) is string element)
             return $"::helix::Array<{element}>";
+        if (_b.SerializedOnlyName(f.Type) is string serializedOnly)
+            return serializedOnly;
         return Spell(f.Type, f.Where, f.Name);
     }
     // The value handle of a class in the C++ script API.
@@ -359,6 +361,9 @@ public sealed class CppGenerator
             _references.TryAdd($"::{ns}::HxRef_{known}", (target, 2));
             return;
         }
+        // A struct only files hold: its own Transfer (in its header) does the work.
+        if (_b.SerializedOnlyName(type) != null)
+            return;
         Mapping m = _b.Map.Map(type, where, what);
         switch (m.Kind)
         {
@@ -374,6 +379,9 @@ public sealed class CppGenerator
                 }
                 break;
             case MapKind.Primitive or MapKind.Bool or MapKind.Enum:
+                break;
+            // Its TransferTraits (the header that declares it gives them).
+            case MapKind.Handle:
                 break;
             case MapKind.String when !type.Name.EndsWith("StringView", StringComparison.Ordinal):
                 break;
@@ -842,6 +850,7 @@ public sealed class CppGenerator
     {
         MapKind.Bool => "u8* result",
         MapKind.TypeId => "u32* result",
+        MapKind.Handle => "u64* result",
         MapKind.String => "InteropString* result",
         MapKind.Object => "InteropObject* result",
         MapKind.Array => "InteropArray* result",
@@ -857,6 +866,8 @@ public sealed class CppGenerator
                 return new() { $"*result = ({expr}) ? 1 : 0;" };
             case MapKind.TypeId:
                 return new() { $"*result = ({expr}).value;" };
+            case MapKind.Handle:
+                return new() { $"*result = ({expr}).Id();" };
             case MapKind.String:
                 return new() { $"*result = PassString({expr});" };
             case MapKind.Object:
@@ -963,6 +974,17 @@ public sealed class CppGenerator
                 // No object is no error here: the answer is that it is not alive.
                 _c.Open($"i32 {th.Name}(u64 self, u8* result)");
                 _c.Line($"*result = ObjectHandles<{Q(t)}>::FromId(self) ? 1 : 0;");
+                _c.Line("return InteropOk;");
+                _c.Close();
+                _c.Line();
+                return;
+            case ThunkKind.Delete:
+                // From the C# finalizer's thread: the deletion waits for the main thread (ReleaseCollected).
+                _c.Open($"void {th.Name}_Now(u64 id)");
+                _c.Line($"delete ObjectHandles<{Q(t)}>::FromId(id);");
+                _c.Close();
+                _c.Open($"i32 {th.Name}(u64 self)");
+                _c.Line($"::helix::scripting::QueueRelease(&{th.Name}_Now, self);");
                 _c.Line("return InteropOk;");
                 _c.Close();
                 _c.Line();
@@ -1176,13 +1198,8 @@ public sealed class CppGenerator
         _c.Line($"ModuleId mod = FindModule(\"{_b.Module.Name}\");");
         _c.Line("if (!mod.IsValid())");
         _c.Line($"    mod = RegisterModule(\"{_b.Module.Name}\", ModuleKind::{moduleKind});");
-        // The types of the modules this one references, found by name: a module in a binary of its own (a game module
-        // against the shared engine on Windows) has its own TypeOf slots, which the other binary filled.
-        foreach (TypeModel t in UsedExternals())
-        {
-            _c.Line($"if (!TypeOf<{Q(t)}>().IsValid())");
-            _c.Line($"    BindNativeType<{Q(t)}>(FindType(\"{t.CsNamespace}.{t.RegistryName}\"));");
-        }
+        // The types of the modules this one references: TypeOf finds them by their C++ key in the process's registry
+        // (a module in a binary of its own has its own TypeOf slots).
         foreach (TypeModel t in types)
         {
             TypeModel? baseModel = t.Kind == TypeKind.Class ? _b.BaseOf(t) : null;
@@ -1211,6 +1228,7 @@ public sealed class CppGenerator
         _c.Line("    return false;");
         _c.Line("gHxManaged = table;");
         _c.Line("::helix::scripting::SetManagedHandleRelease(std::bit_cast<void (*)(::helix::u64)>(table[0]));");
+        _c.Line("::helix::scripting::SetManagedHandleRetain(std::bit_cast<::helix::u64 (*)(::helix::u64)>(table[1]));");
         _c.Line($"::helix::scripting::RegisterManagedFunctions(\"{_b.Module.Name}\", table, count);");
         _c.Line("return true;");
         _c.Close();
@@ -1362,6 +1380,9 @@ public sealed class CppGenerator
         if (_b.SerializedOnly(f.Type))
             return;
         Mapping m = _b.Map.Map(f.Type, f.Where, $"{t.Name}.{f.Name}");
+        // A class bound by hand has no type in the registry (its object is reached through its C# side).
+        if (m.Kind == MapKind.Handle)
+            return;
         bool readOnly = f.Type.Const || f.Tag.Has("ReadOnly");
         bool serialized = !f.Static && !readOnly && !f.Tag.Has("NonSerialized");
         string flags = Flags(!f.Tag.Has("Private"), f.Static, readOnly, serialized);

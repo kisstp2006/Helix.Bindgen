@@ -90,6 +90,36 @@ namespace helix::sample
         u64 wrapper_ = 0;
     };
 
+    // A class bound by hand: C# knows its objects by their ids (Sample.Badge, written in C#).
+    HX_HANDLE(CSharp = "Sample.Badge")
+    class Badge
+    {
+    public:
+        explicit Badge(i32 n) : number(n), id_(++Next()) {}
+        u64 Id() const { return id_; }
+        i32 number;
+
+    private:
+        static u64& Next()
+        {
+            static u64 next = 0;
+            return next;
+        }
+        u64 id_;
+    };
+
+    // A value only files hold (not bound: fields of it are serialized and left out of C#).
+    HX_STRUCT(SerializedOnly)
+    struct Blob
+    {
+        i32 a = 3;
+        template <class V>
+        void Transfer(V& v)
+        {
+            v.Field("a", a);
+        }
+    };
+
     HX_CLASS()
     class Mover : public Thing, public IDamageable
     {
@@ -135,6 +165,9 @@ namespace helix::sample
         HX_FUNCTION(Void) bool Relabel(StringView value);
         HX_FUNCTION() void Damage(i32 amount) override;
         HX_FUNCTION() i32 Weight() const override { return 10; }
+        // A field of a class bound by hand: a C# property answering its C# object.
+        HX_FIELD() Badge badge{9};
+        HX_FUNCTION() i32 BadgeNumber(u64 id) const { return id == badge.Id() ? badge.number : -1; }
         HX_PROPERTY() i32 rank() const override { return 4; }
         HX_FUNCTION() virtual void OnHit(i32 damage) { health -= damage; }
         HX_FUNCTION() void TakeHit(i32 damage) { OnHit(damage); }
@@ -162,6 +195,7 @@ namespace helix::sample
         Vector3 position_;
         Hit lastHit_;
         HX_FIELD(SerializeField) i32 secret_ = 7;
+        HX_FIELD(SerializeField) Blob blob_;
     };
 
     // Abstract in C++: made only as the subclass of a C# class that overrides Area.
@@ -174,6 +208,52 @@ namespace helix::sample
         HX_FUNCTION() static f32 TotalArea();
 
         scripting::TypeId HelixType() const override;
+    };
+
+    // Its C# class derives from a C# class written by hand below Thing's (Vehicle, which declares Wheels).
+    HX_CLASS(CSharpBase = "Sample.Vehicle")
+    class Car : public Thing
+    {
+    public:
+        HX_FUNCTION(Constructor) explicit Car(StringView name) : Thing(name) {}
+        HX_FUNCTION(Name = "WheelCount", Internal) i32 WheelCount() const { return 4; }
+
+        scripting::TypeId HelixType() const override;
+    };
+
+    // A root whose objects C# makes and owns (HX_CLASS(Root, Owned)): deleted once their C# object is collected and
+    // ReleaseCollected ran; C++ keeps one alive by retaining its wrapper.
+    HX_CLASS(Root, Owned)
+    class Ticket
+    {
+    public:
+        HX_FUNCTION(Constructor) explicit Ticket(i32 number);
+        virtual ~Ticket();
+        Ticket(const Ticket&) = delete;
+        Ticket& operator=(const Ticket&) = delete;
+
+        HX_PROPERTY() i32 number() const { return number_; }
+        HX_FUNCTION() virtual i32 Price() const { return 10; }
+        // The tickets alive.
+        HX_FUNCTION() static i32 Count();
+        // C++ holds a ticket (its C# object kept alive), lets it go, or deletes it.
+        HX_FUNCTION() static void Hold(Ticket* ticket);
+        HX_FUNCTION() static void LetGo();
+        HX_FUNCTION() static void DeleteHeld();
+        // The held ticket's price (through a C# override), -1 without one.
+        HX_FUNCTION() static i32 HeldPrice();
+        // The tickets whose C# objects were collected are deleted.
+        HX_FUNCTION() static void Collect();
+
+        u64 Id() const { return id_; }
+        u64& Wrapper() { return wrapper_; }
+        static Ticket* Find(u64 id);
+        virtual scripting::TypeId HelixType() const;
+
+    private:
+        i32 number_ = 0;
+        u64 id_ = 0;
+        u64 wrapper_ = 0;
     };
 
     HX_CLASS(Static)
@@ -196,4 +276,13 @@ struct helix::scripting::ObjectHandles<helix::sample::Thing>
     static sample::Thing* FromId(u64 id);
     static TypeId TypeOf(const sample::Thing* thing) { return thing->HelixType(); }
     static u64& WrapperOf(sample::Thing* thing) { return thing->Wrapper(); }
+};
+
+template <>
+struct helix::scripting::ObjectHandles<helix::sample::Ticket>
+{
+    static u64 ToId(const sample::Ticket* t) { return t->Id(); }
+    static sample::Ticket* FromId(u64 id) { return sample::Ticket::Find(id); }
+    static TypeId TypeOf(const sample::Ticket* t) { return t->HelixType(); }
+    static u64& WrapperOf(sample::Ticket* t) { return t->Wrapper(); }
 };

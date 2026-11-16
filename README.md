@@ -39,7 +39,12 @@ private:
 - Types: `HX_CLASS`, `HX_STRUCT` (plain fields, the same layout in C#, checked by static asserts and at load),
   `HX_ENUM`, `HX_INTERFACE`; nested types; `Namespace`, `Attributes` (C# attributes as text), `Sealed`, `Abstract`,
   `Internal` (an internal C# type), `Static`, and `Root` on the class whose ids identify every object below it (`ObjectHandles<Root>` gives ids, objects
-  and dynamic types).
+  and dynamic types); `CSharpBase = "Namespace.Class"` puts a C# class written by hand between the C++ base's C# class
+  and the generated one (it takes the wrapper's id in a `protected internal` constructor and has one without
+  arguments; its abstract members are implemented in the generated class's partial part).
+  `Owned` on a root whose objects nothing else owns: what a C# constructor makes is deleted after its C# object is
+  collected (the finalizer queues it, `scripting::ReleaseCollected` deletes on the main thread), and C++ code holding
+  one keeps it alive with `scripting::RetainWrapper` (a strong handle let go with `ReleaseWrapper`).
 - Members: `HX_FIELD` (a C# property on classes, a field on structs; `ReadOnly`, `NonSerialized`, private ones with
   `SerializeField` are registered for serialization but not in C#), `HX_PROPERTY` on a getter (the setter `Set<Name>`
   is paired, or `Setter`; `SetterThrows` for a C# setter that throws NotImplementedException), `HX_FUNCTION`
@@ -67,7 +72,8 @@ private:
   as members read and written as in C# (`counter.Scale = 2.5f; f32 s = counter.Scale;`). Failed calls are logged and
   answer the default value.
 - Objects: one C# wrapper per native object, its GC handle in the root class's wrapper slot (weak for plain
-  wrappers, strong for objects of C# classes deriving from C++ ones, so their state lives with the native object);
+  wrappers, strong for objects of C# classes deriving from C++ ones, so their state lives with the native object,
+  weak again for owned roots);
   the root class has the reference's equality: a destroyed object is `== null` and false, `is null` sees only the
   C# reference; members of destroyed objects throw (through `Native.MakeException`).
 - C# classes deriving from C++ classes (a class with a tagged C++ constructor): its tagged virtual functions are
@@ -114,7 +120,8 @@ private:
   of the headers the module includes, and object references: pointers to objects of root classes and value handles
   of the C++ script API (`HelixEngine::GameObject other;`), checked against the field's type when read. Fields C#
   does not reach through the bindings (value handles, reference wrappers such as `PPtr<T>`, arrays of them and of
-  strings) are serialized and left out of C#.
+  strings, structs tagged `HX_STRUCT(SerializedOnly)`, which are not bound and transfer through their own `Transfer`)
+  are serialized and left out of C#.
 
 Release, Ryzen 7 3750H, the sample module (its id lookup is a list search):
 

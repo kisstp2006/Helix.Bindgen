@@ -159,6 +159,49 @@ namespace Helix.Interop
         }
     }
 
+    /// <summary>
+    /// The C# objects of classes bound by hand (HX_HANDLE): the C# side of each such class registers how it makes (or
+    /// finds) the C# object of a native id; generated fields of those classes answer it.
+    /// </summary>
+    public static class Handles
+    {
+        static readonly Dictionary<Type, Func<ulong, Type, object>> s_Makers = new();
+
+        /// <summary>How the C# objects of a class (and of the classes below it) are made: of(id, the class asked for).</summary>
+        public static void Register(Type type, Func<ulong, Type, object> of)
+        {
+            lock (s_Makers)
+                s_Makers[type] = of;
+        }
+
+        static Func<ulong, Type, object> Maker(Type type)
+        {
+            Func<ulong, Type, object> of = null;
+            lock (s_Makers)
+                for (Type t = type; t != null && of == null; t = t.BaseType)
+                    s_Makers.TryGetValue(t, out of);
+            return of;
+        }
+
+        /// <summary>The C# object of a native id (null for 0); the maker of T or of the nearest base registered.</summary>
+        public static T Of<T>(ulong id) where T : class
+        {
+            if (id == 0)
+                return null;
+            Func<ulong, Type, object> of = Maker(typeof(T));
+            if (of == null)
+            {
+                // A class bound by hand registers in its static constructor (or a base's).
+                for (Type t = typeof(T); t != null; t = t.BaseType)
+                    RuntimeHelpers.RunClassConstructor(t.TypeHandle);
+                of = Maker(typeof(T));
+            }
+            if (of == null)
+                throw new InvalidOperationException($"no C# objects of {typeof(T)} for native ids (Handles.Register)");
+            return (T)of(id, typeof(T));
+        }
+    }
+
     /// <summary>C# types and the native ids of the same types (filled by each module's generated loader).</summary>
     public static class Types
     {
@@ -243,6 +286,8 @@ namespace Helix.Interop
     {
         ulong HxId { get; set; }
         bool HxDerived { get; set; }
+        // The native object was made by this object's constructor and is deleted when it is collected (owned roots).
+        bool HxOwned { get => false; set { } }
     }
 
     /// <summary>
@@ -292,6 +337,22 @@ namespace Helix.Interop
             catch (Exception e)
             {
                 Native.ReportException(e);
+            }
+        }
+
+        /// <summary>A strong handle of the object a handle native code holds names (0: none, or collected); native code frees it.</summary>
+        [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+        public static ulong RetainHandle(ulong handle)
+        {
+            try
+            {
+                object target = handle != 0 ? GCHandle.FromIntPtr((IntPtr)handle).Target : null;
+                return target == null ? 0 : (ulong)GCHandle.ToIntPtr(GCHandle.Alloc(target));
+            }
+            catch (Exception e)
+            {
+                Native.ReportException(e);
+                return 0;
             }
         }
 
