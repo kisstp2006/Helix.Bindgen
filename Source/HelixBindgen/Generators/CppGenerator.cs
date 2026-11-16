@@ -714,8 +714,9 @@ public sealed class CppGenerator
         _c.Line("    return [](void* m, const void* o) -> void* { return static_cast<Root*>(new (m) T(*static_cast<const T*>(static_cast<const Root*>(o)))); };");
         _c.Close();
         _c.Line();
-        _c.Line("// A type of the module: the one it has (declared by the module's own registry), else a new one.");
-        _c.Open("TypeId HxDeclare(ModuleId module, StringView nameSpace, StringView name, TypeKind kind, TypeId base, u32 flags)");
+        _c.Line("// A type of the module: the one it has (declared by the module's own registry), else a new one (unused by a");
+        _c.Line("// module of handle classes only).");
+        _c.Open("[[maybe_unused]] TypeId HxDeclare(ModuleId module, StringView nameSpace, StringView name, TypeKind kind, TypeId base, u32 flags)");
         _c.Line("String full(nameSpace);");
         _c.Line("full.Append(\".\");");
         _c.Line("full.Append(name);");
