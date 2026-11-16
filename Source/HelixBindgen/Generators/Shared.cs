@@ -58,10 +58,19 @@ public sealed class Binding
     public readonly List<Thunk> Thunks = new();
     public readonly Dictionary<TypeModel, TypeModel?> Roots = new();
 
+    /// <summary>Classes of the module deriving from another module's API handle (no script base on the way): that
+    /// module makes and owns their objects over its own, so they are registered with it (NativeHandleClass), not bound.</summary>
+    public readonly List<TypeModel> HandleClasses = new();
+
     public Binding(ModuleModel module)
     {
         Module = module;
         Map = new TypeMap(module);
+        foreach (TypeModel t in module.Types.Where(IsHandleClass).ToList())
+        {
+            HandleClasses.Add(t);
+            module.Types.Remove(t);
+        }
         foreach (TypeModel t in module.Types)
         {
             Roots[t] = FindRoot(t);
@@ -74,6 +83,29 @@ public sealed class Binding
     }
 
     public readonly Dictionary<MethodModel, TypeModel> OwnerOf = new();
+
+    // A handle class names its base by the script API's name (the C# namespace as C++ namespaces:
+    // ::HelixEngine::UI::Element), where a bound class of a module names another module's class by its C++ name.
+    bool IsHandleClass(TypeModel t)
+    {
+        if (t.External || t.Kind != TypeKind.Class)
+            return false;
+        foreach (string spelled in t.Bases)
+        {
+            TypeModel? b = Map.Find(spelled);
+            if (b == null || b.Kind != TypeKind.Class)
+                continue;
+            string name = spelled.StartsWith("::", StringComparison.Ordinal) ? spelled[2..] : spelled;
+            if (!b.External || name != b.CsFullName.Replace(".", "::"))
+                return false;
+            List<TypeModel> chain = BaseChain(b).ToList();
+            return !chain.Any(c => c.Tag.Has("ScriptBase")) && FindRoot(b) != null;
+        }
+        return false;
+    }
+
+    /// <summary>The API handle a handle class derives from (the nearest class of another module).</summary>
+    public TypeModel HandleBaseOf(TypeModel t) => BaseChain(t).Skip(1).First(c => c.External);
 
     // ----------------------------------------------------------------------------------------------- the bridge
 

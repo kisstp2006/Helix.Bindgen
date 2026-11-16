@@ -104,6 +104,11 @@ private:
   of its chain (and the API's names for the classes of that chain). Events take a `Callback` and answer a token for
   `Remove`. A failed call is logged and answers the default. A member tagged `Internal` is internal in C# (for C#
   written by hand next to it) and still in the C++ API.
+- Handle classes: a class of a game module deriving from another module's API handle by the API's name
+  (`class Gauge : public ::HelixEngine::UI::Element`) is not bound: it is registered as a `NativeHandleClass` with
+  every tag of the class, a constructor that adopts the object's id, and its tagged fields and properties (set
+  through their setters) with setters by kind (bool, i32, i64, f32, f64, String, Color); the handle's module makes
+  its objects (the UI's element types: `HX_CLASS(HxmlElement)`, `HX_FIELD(HxmlAttribute)`).
 - Scripts: a class deriving from a class tagged `ScriptBase` (the engine's GameBehaviour or ScriptableObject) is a
   script class: its message methods (public or not, no virtual needed), its methods without arguments or with one
   bool, and its methods without arguments that answer a pointer (the pointee's name goes with them: the engine takes

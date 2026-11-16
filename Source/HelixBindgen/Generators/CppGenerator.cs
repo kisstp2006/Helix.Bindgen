@@ -114,6 +114,8 @@ public sealed class CppGenerator
         _c.Line("#include <Helix/Scripting/Bindings/Marshal.h>");
         _c.Line("#include <Helix/Scripting/Types/TypeBuilder.h>");
         _c.Line("#include <Helix/Scripting/Scripts/NativeScript.h>");
+        if (_b.HandleClasses.Count > 0)
+            _c.Line("#include <Helix/Scripting/Scripts/NativeHandleClass.h>");
         CollectSerialization();
         if (_transfers.Count > 0)
             _c.Line("#include <Helix/Serialization/Transfer/Dynamic.h>");
@@ -191,7 +193,7 @@ public sealed class CppGenerator
     // Private serialized fields: their member pointers through explicit instantiation (which does not check access).
     void WritePrivateAccess()
     {
-        var fields = Own.SelectMany(t => t.Fields.Where(f => f.Tag.Has("Private") && !f.Static).Select(f => (t, f))).ToList();
+        var fields = Own.Concat(_b.HandleClasses).SelectMany(t => t.Fields.Where(f => f.Tag.Has("Private") && !f.Static).Select(f => (t, f))).ToList();
         var methods = Own.Where(_b.IsScriptClass).SelectMany(t => _b.ScriptMethods(t)).Where(x => !x.Method.Public).Distinct().ToList();
         if (fields.Count == 0 && methods.Count == 0)
             return;
@@ -241,6 +243,103 @@ public sealed class CppGenerator
     }
 
     readonly Dictionary<MethodModel, int> _privateMethods = new();
+
+    // The handle classes of the module (classes deriving from another module's API handle): their tags, how they are
+    // made over an object of the handle's module (the handle's id adopted by the constructor) and destroyed, and their
+    // tagged fields with setters by kind; registered with Helix.Scripting for the base's module.
+    void WriteHandleClasses()
+    {
+        foreach (TypeModel t in _b.HandleClasses)
+        {
+            string q = Q(t);
+            _c.Open();
+            WriteTags("tags", t.Tag);
+            // Tagged fields are set as they are; tagged properties through their setters (the class reacts there).
+            var fields = t.Fields.Where(f => !f.Static).ToList();
+            var properties = t.Properties.Where(p => !p.Static && p.Setter != null).ToList();
+            for (int i = 0; i < fields.Count; i++)
+                WriteTags($"fieldTags{i}", fields[i].Tag);
+            for (int i = 0; i < properties.Count; i++)
+                WriteTags($"fieldTags{fields.Count + i}", properties[i].Getter.Tag);
+            int count = fields.Count + properties.Count;
+            if (count > 0)
+            {
+                _c.Open("static const ::helix::scripting::NativeHandleField fields[] =");
+                for (int i = 0; i < count; i++)
+                {
+                    string tags = $"Span<const ::helix::scripting::NativeTag>(fieldTags{i}, sizeof(fieldTags{i}) / sizeof(fieldTags{i}[0]))";
+                    string name, kind, cpp, body;
+                    if (i < fields.Count)
+                    {
+                        FieldModel f = fields[i];
+                        (kind, cpp) = HandleFieldKind(t, f.Name, f.Type, f.Where);
+                        string target = _privateTags.TryGetValue(f, out int pk) ? $"(static_cast<{q}*>(o)->*HxMember(HxTag{pk}{{}}))" : $"static_cast<{q}*>(o)->{f.Name}";
+                        name = f.Tag.Get("Name") ?? f.Name;
+                        body = $"{target} = *static_cast<const {cpp}*>(v);";
+                    }
+                    else
+                    {
+                        PropertyModel p = properties[i - fields.Count];
+                        (kind, cpp) = HandleFieldKind(t, p.Getter.Name, p.Getter.Return, p.Getter.Where);
+                        name = p.CsName;
+                        body = $"static_cast<{q}*>(o)->{p.Setter!.Name}(*static_cast<const {cpp}*>(v));";
+                    }
+                    _c.Line($"::helix::scripting::NativeHandleField{{\"{name}\", {tags}, ::helix::scripting::NativeValueKind::{kind}, [](void* o, const void* v) {{ {body} }}}},");
+                }
+                _c.Close("};");
+            }
+            _c.Line("::helix::scripting::NativeHandleClass c;");
+            _c.Line($"c.module = \"{_b.Module.Name}\";");
+            _c.Line($"c.nameSpace = \"{t.CsNamespace}\";");
+            _c.Line($"c.name = \"{t.RegistryName}\";");
+            _c.Line($"c.base = \"{_b.HandleBaseOf(t).CsFullName}\";");
+            _c.Line("c.tags = Span<const ::helix::scripting::NativeTag>(tags, sizeof(tags) / sizeof(tags[0]));");
+            _c.Line($"c.size = u32(sizeof({q}));");
+            _c.Line($"c.alignment = u32(alignof({q}));");
+            _c.Line($"static_assert(std::is_default_constructible_v<{q}>, \"{t.Name}: a class made over another module's object needs a constructor without arguments\");");
+            _c.Open("c.construct = [](void* memory, u64 id) -> void*");
+            _c.Line("::helix::scripting::detail::AdoptedHandleId() = id;");
+            _c.Line($"void* made = new (memory) {q}();");
+            _c.Line("::helix::scripting::detail::AdoptedHandleId() = 0;");
+            _c.Line("return made;");
+            _c.Close("};");
+            _c.Line($"c.destroy = [](void* o) {{ static_cast<{q}*>(o)->~{t.Name}(); }};");
+            if (count > 0)
+                _c.Line($"c.fields = Span<const ::helix::scripting::NativeHandleField>(fields, {count}u);");
+            _c.Line($"c.key = ::helix::scripting::HandleClassKey<{q}>();");
+            _c.Line("::helix::scripting::RegisterNativeHandleClass(c);");
+            _c.Close();
+        }
+    }
+
+    // Every tag of a class or field as key and value (a flag has an empty value); a placeholder keeps the array non-empty.
+    void WriteTags(string name, TagArgs tag)
+    {
+        var entries = tag.Flags.OrderBy(x => x, StringComparer.Ordinal).Select(f => (f, ""))
+                         .Concat(tag.Values.OrderBy(x => x.Key, StringComparer.Ordinal).Select(v => (v.Key, v.Value))).ToList();
+        string list = entries.Count == 0 ? "{\"\", \"\"}" : string.Join(", ", entries.Select(e => $"{{\"{e.Item1}\", \"{Escape(e.Item2)}\"}}"));
+        _c.Line($"static const ::helix::scripting::NativeTag {name}[] = {{{list}}};");
+    }
+
+    static string Escape(string v) => v.Replace("\\", "\\\\").Replace("\"", "\\\"");
+
+    static (string Kind, string Cpp) HandleFieldKind(TypeModel t, string member, TypeRef type, Location where)
+    {
+        if (type.Pointers != 0 || (type.Reference && !type.Const))
+            throw new BindgenException(where, $"{t.Name}.{member}: a member set from text is a value (bool, integers, floats, String, Color)");
+        string last = type.Name.Split("::")[^1];
+        return last switch
+        {
+            "bool" => ("Bool", "bool"),
+            "i32" or "int" => ("I32", "::helix::i32"),
+            "i64" => ("I64", "::helix::i64"),
+            "f32" or "float" => ("F32", "::helix::f32"),
+            "f64" or "double" => ("F64", "::helix::f64"),
+            "String" => ("String", "::helix::String"),
+            "Color" => ("Color", "::helix::Color"),
+            _ => throw new BindgenException(where, $"{t.Name}.{member}: {type.Name} is no kind a member set from text takes (bool, i32, i64, f32, f64, String, Color)"),
+        };
+    }
 
     static bool ReturnsPointer(MethodModel m) => m.Return.Pointers > 0;
 
@@ -1217,6 +1316,7 @@ public sealed class CppGenerator
         foreach (TypeModel t in types)
             WriteBuilder(t, ids[t]);
         WriteScriptClasses(ids);
+        WriteHandleClasses();
         _c.Line($"RegisterNativeFunctions(\"{_b.Module.Name}\", kHxFunctions, {_b.Thunks.Count}u);");
         _c.Line("gHxRegistered = true;");
         _c.Line("return true;");
@@ -1239,6 +1339,8 @@ public sealed class CppGenerator
         _c.Line("    return;");
         _c.Line("gHxRegistered = false;");
         _c.Line($"::helix::scripting::UnregisterNativeScriptClasses(\"{_b.Module.Name}\");");
+        if (_b.HandleClasses.Count > 0)
+            _c.Line($"::helix::scripting::UnregisterNativeHandleClasses(\"{_b.Module.Name}\");");
         _c.Line($"::helix::scripting::UnloadModule(::helix::scripting::FindModule(\"{_b.Module.Name}\"));");
         _c.Close();
         _c.Line();

@@ -233,6 +233,7 @@ public sealed class ApiGenerator
             _c.Line("static ::helix::scripting::TypeId cache;");
             _c.Line($"return ::helix::scripting::ApiType(\"{t.CsFullName}\", cache);");
             _c.Close();
+            _c.Line($"static constexpr const char* HxApiName() {{ return \"{t.CsFullName}\"; }}");
             if (root)
             {
                 _c.Line("// The reference's null semantics: a destroyed object is null.");
