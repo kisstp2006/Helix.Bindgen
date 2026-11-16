@@ -113,6 +113,9 @@ public sealed class ApiGenerator
         _c.Line();
         _c.Open("namespace helix::scripting::hxapi");
         _c.Line($"inline constexpr char {_module}[] = \"{_b.Module.Name}\";");
+        // Every module's API has the helper; the first header included defines it.
+        _c.Line("#ifndef HELIX_HXAPI_SLOT");
+        _c.Line("#define HELIX_HXAPI_SLOT");
         _c.Line("// A value in an 8 byte slot of a call with many arguments (its bytes from the first).");
         _c.Line("template <class T>");
         _c.Line("inline ::helix::u64 Slot(T value)");
@@ -121,6 +124,7 @@ public sealed class ApiGenerator
         _c.Line("    std::memcpy(&slot, &value, sizeof(T));");
         _c.Line("    return slot;");
         _c.Line("}");
+        _c.Line("#endif");
         _c.Close();
         _c.Line();
 
@@ -206,7 +210,10 @@ public sealed class ApiGenerator
         else if (IsHandle(t))
         {
             bool root = _b.RootOf(t) == t;
-            string baseName = root || baseModel == null ? "::helix::scripting::ScriptHandle" : ApiQ(baseModel);
+            // The nearest handle of the chain: a script base class (GameBehaviour, ScriptableObject) is what scripts
+            // derive from, not a handle, so a class below one is a handle of the handle above it.
+            TypeModel? handleBase = root ? null : _b.BaseChain(t).Skip(1).FirstOrDefault(IsHandle);
+            string baseName = handleBase == null ? "::helix::scripting::ScriptHandle" : ApiQ(handleBase);
             _c.Line($"// A handle of the engine's {t.Name}: its id, null once the object is gone.");
             _c.Open($"class {t.Name} : public {baseName}");
             _c.Line("public:", -1);

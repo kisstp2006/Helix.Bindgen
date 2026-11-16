@@ -99,7 +99,8 @@ private:
   not take them), methods with overloads and defaults, statics, constructors as `New`, generic members as templates
   (`GetComponent<T>()` gives a handle, or an `ObjectRef` for a C++ script class), out and ref parameters as
   references, the reference's null semantics (`if (go)`, `go == nullptr` once destroyed); value types and enums are
-  aliases of the C++ types; a class tagged `ScriptBase` becomes the C++ class scripts derive from, with the members
+  aliases of the C++ types; the API headers of several modules go together (the engine's first; a class below a
+  script base class is a handle of the nearest handle above it); a class tagged `ScriptBase` becomes the C++ class scripts derive from, with the members
   of its chain (and the API's names for the classes of that chain). Events take a `Callback` and answer a token for
   `Remove`. A failed call is logged and answers the default. A member tagged `Internal` is internal in C# (for C#
   written by hand next to it) and still in the C++ API.
