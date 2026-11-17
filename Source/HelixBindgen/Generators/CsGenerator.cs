@@ -277,8 +277,10 @@ public sealed class CsGenerator
     string ParamDecl(MethodModel m, ParameterModel p, string? overrideType = null)
     {
         Mapping pm = _b.Map.Map(p.Type, m.Where, p.Name);
-        string mod = pm.ByRef ? (IsOut(m, p) ? "out " : "ref ") : "";
-        string def = p.Default != null && !pm.ByRef ? " = " + Default(p.Default, pm, m.Where) : "";
+        // The tag Params names a last array parameter C# takes as params (no default then).
+        bool isParams = m.Tag.Get("Params") == p.Name && m.Parameters.Count > 0 && m.Parameters[^1] == p;
+        string mod = pm.ByRef ? (IsOut(m, p) ? "out " : "ref ") : isParams ? "params " : "";
+        string def = p.Default != null && !pm.ByRef && !isParams ? " = " + Default(p.Default, pm, m.Where) : "";
         return $"{mod}{overrideType ?? CsType(pm)} {Id(p.Name)}{def}";
     }
 
