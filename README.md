@@ -52,7 +52,8 @@ private:
   taking a type id, `Lists` for `List<T>` overloads of array results, `NativeArrays` for an internal overload taking
   `Helix.Collections.NativeArray<T>` for each span of plain values (its memory as it is), `Leaf` for calls without a GC transition, `Void`
   to drop a result the member does not have), `HX_EVENT` on an `Event<...>` or `Query<...>` (or a function returning
-  one by reference; `Delegate` names the C# delegate type, `Action` and `Func` otherwise), `Hidden`, `Name`.
+  one by reference; `Delegate` names the C# delegate type, `Action` and `Func` otherwise; `ApiName` its name in the
+  C++ script API when C# written by hand has its C# name, on events, properties and methods), `Hidden`, `Name`.
 - Values: the primitives, `bool`, `String` / `StringView`, enums, structs, objects of root classes (by pointer or
   reference; ids across), `Array<T>` and `Span<const T>` of values, strings and objects, `scripting::TypeId`
   (`System.Type`).

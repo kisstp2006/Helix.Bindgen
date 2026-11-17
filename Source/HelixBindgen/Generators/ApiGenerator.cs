@@ -267,7 +267,7 @@ public sealed class ApiGenerator
         _c.Line();
     }
 
-    static string PropName(Thunk th) => th.Property?.CsName ?? th.Field!.CsName;
+    static string PropName(Thunk th) => th.Property?.ApiName ?? th.Field!.CsName;
 
     // A property member: an empty member read and written like the C# property (its type cannot be copied, so `auto`
     // does not take it); a static one is a static member of the same kind.
@@ -375,11 +375,11 @@ public sealed class ApiGenerator
             foreach (Thunk th in _b.Thunks.Where(x => x.Owner == c))
             {
                 if (th.Property != null)
-                    members.Add(th.Property.CsName);
+                    members.Add(th.Property.ApiName);
                 if (th.Field != null)
                     members.Add(th.Field.CsName);
                 if (th.Method != null)
-                    members.Add(th.Method.CsName);
+                    members.Add(th.Method.ApiName);
             }
         return members.Contains(name) ? name + "Value" : Id(name);
     }
@@ -389,7 +389,7 @@ public sealed class ApiGenerator
         MethodModel m = th.Method!;
         Generic? g = GenericOf(m);
         (string ret, List<string> ps, _) = Signature(t, th, g);
-        string name = IsConstructor(th) ? "New" : m.CsName;
+        string name = IsConstructor(th) ? "New" : m.ApiName;
         bool isStatic = th.Static || IsConstructor(th);
         string template = g != null ? $"template <class {g.Parameter}>\n{new string(' ', 8)}" : "";
         _c.Line($"{template}{(isStatic ? "static " : "")}{ret} {name}({string.Join(", ", ps)}){(isStatic ? "" : " const")};");
@@ -449,9 +449,9 @@ public sealed class ApiGenerator
     void WriteEventDeclaration(Thunk add)
     {
         EventModel e = add.Event!;
-        string s = $"HxEvent_{e.CsName}";
+        string s = $"HxEvent_{e.ApiName}";
         _c.Line();
-        _c.Line($"// The event {e.CsName}: Add answers a token that Remove takes.");
+        _c.Line($"// The event {e.ApiName}: Add answers a token that Remove takes.");
         _c.Open($"struct {s}");
         _c.Line($"using Handler = {HandlerType(e)};");
         _c.Line($"{s}() = default;");
@@ -459,7 +459,7 @@ public sealed class ApiGenerator
         _c.Line("::helix::u64 Add(Handler handler) const;");
         _c.Line("void Remove(::helix::u64 token) const;");
         _c.Close("};");
-        _c.Line(e.Static ? $"static inline {s} {e.CsName}{{}};" : $"HX_NO_UNIQUE_ADDRESS {s} {e.CsName};");
+        _c.Line(e.Static ? $"static inline {s} {e.ApiName}{{}};" : $"HX_NO_UNIQUE_ADDRESS {s} {e.ApiName};");
     }
 
     void WriteEventDefinitions(TypeModel t, Thunk add)
@@ -467,8 +467,8 @@ public sealed class ApiGenerator
         EventModel e = add.Event!;
         Thunk remove = _b.Thunks.First(x => x.Event == e && x.Kind == ThunkKind.EventRemove);
         string q = ApiQ(t);
-        string s = $"{q}::HxEvent_{e.CsName}";
-        string owner = $"reinterpret_cast<const {q}*>(reinterpret_cast<const char*>(this) - ::helix::scripting::OffsetOf(&{q}::{e.CsName}))";
+        string s = $"{q}::HxEvent_{e.ApiName}";
+        string owner = $"reinterpret_cast<const {q}*>(reinterpret_cast<const char*>(this) - ::helix::scripting::OffsetOf(&{q}::{e.ApiName}))";
         string? self = add.Static ? null : SelfOf(t, owner);
         var abi = new List<string>();
         var values = new List<string>();
@@ -481,7 +481,7 @@ public sealed class ApiGenerator
                 abi.Add(m.Kind == MapKind.Object ? types[1] : $"{types[1]} a{i}_n");
             values.Add(EventValue(m, $"a{i}"));
         }
-        string entry = $"HxEntry_{t.Ident}_{e.CsName}";
+        string entry = $"HxEntry_{t.Ident}_{e.ApiName}";
         _c.Open($"struct {entry}");
         _c.Line("::helix::u32 id = 0;");
         _c.Line("void* handle = nullptr;");
@@ -507,7 +507,7 @@ public sealed class ApiGenerator
         addArgs.AddRange(new[] { "std::bit_cast<void*>(adapter)", "entry", "&entry->id", "&entry->handle" });
         _c.Line($"using HxFn = ::helix::i32 (*)({string.Join(", ", addAbi)});");
         _c.Line($"auto hxFn = std::bit_cast<HxFn>(::helix::scripting::ApiFunction<::helix::scripting::hxapi::{_module}>({add.Index}u));");
-        _c.Open($"if (!::helix::scripting::ApiCheck(std::bit_cast<const void*>(hxFn), \"{t.Name}.{e.CsName}\") || !::helix::scripting::ApiStatus(hxFn({string.Join(", ", addArgs)}), \"{t.Name}.{e.CsName}\"))");
+        _c.Open($"if (!::helix::scripting::ApiCheck(std::bit_cast<const void*>(hxFn), \"{t.Name}.{e.ApiName}\") || !::helix::scripting::ApiStatus(hxFn({string.Join(", ", addArgs)}), \"{t.Name}.{e.ApiName}\"))");
         _c.Line("delete entry;");
         _c.Line("return 0;");
         _c.Close();
@@ -530,7 +530,7 @@ public sealed class ApiGenerator
         _c.Line($"using HxFn = ::helix::i32 (*)({string.Join(", ", remAbi)});");
         _c.Line($"auto hxFn = std::bit_cast<HxFn>(::helix::scripting::ApiFunction<::helix::scripting::hxapi::{_module}>({remove.Index}u));");
         _c.Line("if (hxFn)");
-        _c.Line($"    ::helix::scripting::ApiStatus(hxFn({string.Join(", ", remArgs)}), \"{t.Name}.{e.CsName}\");");
+        _c.Line($"    ::helix::scripting::ApiStatus(hxFn({string.Join(", ", remArgs)}), \"{t.Name}.{e.ApiName}\");");
         _c.Line("delete entry;");
         _c.Close();
         _c.Line();
@@ -779,7 +779,7 @@ public sealed class ApiGenerator
             Generic? g = GenericOf(m);
             (string ret, _, List<string> noDefaults) = Signature(t, th, g);
             bool isStatic = th.Static || IsConstructor(th);
-            string name = IsConstructor(th) ? "New" : m.CsName;
+            string name = IsConstructor(th) ? "New" : m.ApiName;
             var args = new List<(Mapping, string)>();
             string? typeArg = null;
             foreach (ParameterModel p in m.Parameters)

@@ -677,6 +677,7 @@ public sealed class Parser
         return new EventModel
         {
             CsName = args.Get("Name") ?? name,
+            ApiName = args.Get("ApiName") ?? args.Get("Name") ?? name,
             Member = name,
             IsFunction = isFunction,
             Static = isStatic,

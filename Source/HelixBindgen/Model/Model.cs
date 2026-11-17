@@ -84,12 +84,16 @@ public sealed class MethodModel
     public TagArgs Tag = new();
     public Location Where = new();
     public string CsName => Tag.Get("Name") ?? Name;
+    /// <summary>Its name in the C++ script API (the tag ApiName: when C# written by hand has the C# name).</summary>
+    public string ApiName => Tag.Get("ApiName") ?? CsName;
     public bool Leaf => Tag.Has("Leaf");
 }
 
 public sealed class PropertyModel
 {
     public string CsName = "";
+    /// <summary>Its name in the C++ script API (the getter's tag ApiName: when C# written by hand has the C# name).</summary>
+    public string ApiName => Getter.Tag.Get("ApiName") ?? CsName;
     public MethodModel Getter = new();
     public MethodModel? Setter;
     public bool Static => Getter.Static;
@@ -98,6 +102,8 @@ public sealed class PropertyModel
 public sealed class EventModel
 {
     public string CsName = "";
+    /// <summary>Its name in the C++ script API (the tag ApiName: when its C# name is taken by C# written by hand).</summary>
+    public string ApiName = "";
     /// <summary>The C++ member: a field or a function returning a reference to the event.</summary>
     public string Member = "";
     public bool IsFunction;

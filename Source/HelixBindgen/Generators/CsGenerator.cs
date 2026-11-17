@@ -987,7 +987,7 @@ public sealed class CsGenerator
         string callbackFn = $"delegate* unmanaged[Cdecl]<global::System.IntPtr{string.Join("", a.Abi.Select(x => ", " + x))}, {(e.Query ? "byte" : "void")}>";
         string what = $"{t.Name}.{e.CsName}";
         Attributes(e.Tag);
-        _c.Open($"public {(add.Static ? "static " : "")}event {del} {Id(e.CsName)}");
+        _c.Open($"{Access(e.Tag)} {(add.Static ? "static " : "")}event {del} {Id(e.CsName)}");
         _c.Open("add");
         _c.Line("if (value == null)");
         _c.Line("    return;");
