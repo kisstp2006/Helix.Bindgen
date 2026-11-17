@@ -147,7 +147,8 @@ public sealed class CsGenerator
                 _c.Line("internal bool m_HxDerived;");
                 _c.Line("ulong global::Helix.Interop.INativeObject.HxId { get => m_HxId; set => m_HxId = value; }");
                 _c.Line("bool global::Helix.Interop.INativeObject.HxDerived { get => m_HxDerived; set => m_HxDerived = value; }");
-                _c.Line(WrapperAccess(t) + " " + t.Name + "(global::Helix.Interop.ObjectId id) { m_HxId = id.Value; }");
+                // No id (a derived class's chain) keeps the one the engine gave the object before its constructor ran.
+                _c.Line(WrapperAccess(t) + " " + t.Name + "(global::Helix.Interop.ObjectId id) { if (id.Value != 0) m_HxId = id.Value; }");
                 if (t.Tag.Has("Owned"))
                 {
                     Thunk delete = _b.Thunks.First(x => x.Owner == t && x.Kind == ThunkKind.Delete);
@@ -168,7 +169,12 @@ public sealed class CsGenerator
             // A script class has the public constructor C# script classes have (the engine makes its objects); one that
             // declares pure virtual functions a protected one (only the classes below it are made).
             if (!zeroArgCtor)
-                _c.Line($"{(_b.IsScriptClass(t) && !_b.DeclaresPure(t) ? "public" : t.Tag.Has("Sealed") ? "private" : "protected")} {t.Name}() {{ }}");
+            {
+                // C# classes deriving from it chain through it without the base making a native object.
+                TypeModel? baseClass = _b.BaseOf(t);
+                string chain = !_b.IsScriptClass(t) && baseClass != null && _b.IsObjectClass(baseClass) ? " : base(default(global::Helix.Interop.ObjectId))" : "";
+                _c.Line($"{(_b.IsScriptClass(t) && !_b.DeclaresPure(t) ? "public" : t.Tag.Has("Sealed") ? "private" : "protected")} {t.Name}(){chain} {{ }}");
+            }
         }
         foreach (Thunk th in _b.Thunks.Where(x => x.Owner == t))
             WriteMember(t, th);
@@ -692,7 +698,10 @@ public sealed class CsGenerator
     void WriteConstructor(TypeModel t, Thunk? th, MethodModel m, string ps, string what)
     {
         string g = G(t);
-        _c.Open($"public {t.Name}({ps})");
+        // Below a generated class the base makes no native object of its own: this constructor makes the one.
+        TypeModel? baseClass = _b.BaseOf(t);
+        string chain = baseClass != null && _b.IsObjectClass(baseClass) ? " : base(default(global::Helix.Interop.ObjectId))" : "";
+        _c.Open($"public {t.Name}({ps}){chain}");
         _c.Open($"if (GetType() == typeof({g}))");
         if (m.RealConstructor && _b.IsAbstractCpp(t))
             _c.Line($"throw new global::System.InvalidOperationException(\"{t.Name} is abstract in C++: derive a C# class from it\");");
