@@ -529,8 +529,13 @@ public sealed class ApiGenerator
         remArgs.AddRange(new[] { "entry->id", "entry->handle" });
         _c.Line($"using HxFn = ::helix::i32 (*)({string.Join(", ", remAbi)});");
         _c.Line($"auto hxFn = std::bit_cast<HxFn>(::helix::scripting::ApiFunction<::helix::scripting::hxapi::{_module}>({remove.Index}u));");
+        // A publisher already destroyed has no handlers left: removing from it is quiet (its entry is freed all the same).
         _c.Line("if (hxFn)");
-        _c.Line($"    ::helix::scripting::ApiStatus(hxFn({string.Join(", ", remArgs)}), \"{t.Name}.{e.ApiName}\");");
+        _c.Open("");
+        _c.Line($"::helix::i32 hxStatus = hxFn({string.Join(", ", remArgs)});");
+        _c.Line("if (hxStatus != ::helix::scripting::InteropMissingObject)");
+        _c.Line($"    ::helix::scripting::ApiStatus(hxStatus, \"{t.Name}.{e.ApiName}\");");
+        _c.Close();
         _c.Line("delete entry;");
         _c.Close();
         _c.Line();
