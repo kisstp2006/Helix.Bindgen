@@ -405,16 +405,22 @@ namespace Helix.Interop
         {
             if (id == 0)
                 return null;
-            Factory f;
+            Factory f, typed;
             lock (s_ByNative)
-                if (!s_ByNative.TryGetValue(nativeType, out f) || f.Make == null)
-                    s_ByType.TryGetValue(typeof(T), out f);
+            {
+                s_ByNative.TryGetValue(nativeType, out f);
+                s_ByType.TryGetValue(typeof(T), out typed);
+            }
+            // The wrapper the object has, while it lives (a script object of a class below an abstract one has its own,
+            // with no factory of its type).
+            Factory rooted = f ?? typed;
+            ulong handle = 0;
+            if (rooted != null && rooted.Root.GetWrapper(id, &handle) == 0 && handle != 0 && GCHandle.FromIntPtr((IntPtr)handle).Target is T known)
+                return known;
+            if (f == null || f.Make == null)
+                f = typed;
             if (f == null || f.Make == null)
                 throw new InvalidOperationException($"no wrapper for native type {nativeType} or {typeof(T)}");
-            // The wrapper the object has, while it lives.
-            ulong handle = 0;
-            if (f.Root.GetWrapper(id, &handle) == 0 && handle != 0 && GCHandle.FromIntPtr((IntPtr)handle).Target is T known)
-                return known;
             object made = f.Make(new ObjectId(id));
             Remember(made, id);
             ulong weak = (ulong)GCHandle.ToIntPtr(GCHandle.Alloc(made, GCHandleType.Weak));

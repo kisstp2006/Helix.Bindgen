@@ -112,6 +112,10 @@ function(helix_bindgen target)
         DEPENDS "${tool}" "${rsp}" ${depends}
         COMMENT "Bindings of ${ARG_MODULE}")
     target_sources(${target} PRIVATE "${cpp}")
+    # A module's bindings are one file of many functions (past the default section limit of MSVC's objects).
+    if(MSVC)
+        set_source_files_properties("${cpp}" PROPERTIES COMPILE_OPTIONS "/bigobj")
+    endif()
     if(ARG_CS_OUTPUT)
         set(${ARG_CS_OUTPUT} "${cs}" PARENT_SCOPE)
     endif()

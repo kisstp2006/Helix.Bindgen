@@ -267,7 +267,7 @@ public sealed class ApiGenerator
         _c.Line();
     }
 
-    static string PropName(Thunk th) => th.Property?.ApiName ?? th.Field!.CsName;
+    static string PropName(Thunk th) => Id(th.Property?.ApiName ?? th.Field!.CsName);
 
     // A property member: an empty member read and written like the C# property (its type cannot be copied, so `auto`
     // does not take it); a static one is a static member of the same kind.

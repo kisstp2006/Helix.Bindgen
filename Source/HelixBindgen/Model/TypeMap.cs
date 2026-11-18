@@ -70,14 +70,80 @@ public sealed class TypeMap
     public TypeMap(ModuleModel module)
     {
         _handles = module.Handles;
+        QualifyNested(module);
         foreach (TypeModel t in module.Types)
         {
             _byName[t.Name] = t;
             _byName[t.CppName] = t;
+            // Qualified as a member names it without the helix:: prefix (two classes of one name in nested namespaces).
+            _byName[StripHelix(t.CppName)] = t;
             if (t.Outer != null)
                 _byName[t.Outer.Name + "::" + t.Name] = t;
             // The C++ script API names a class by its C# namespace (HelixEngine::GameBehaviour).
             _byName.TryAdd(t.CsFullName.Replace(".", "::"), t);
+        }
+    }
+
+    // A member's unqualified type that names a type nested in its class, an outer class or one of their bases is that
+    // nested type (two classes may each nest a Direction): the name is qualified by its class, as C++ looks it up.
+    static void QualifyNested(ModuleModel module)
+    {
+        var byName = new Dictionary<string, TypeModel>();
+        var nested = new Dictionary<string, List<TypeModel>>();
+        foreach (TypeModel t in module.Types)
+        {
+            if (t.Outer == null)
+                byName.TryAdd(t.Name, t);
+            byName.TryAdd(t.CppName, t);
+            if (t.Outer != null)
+            {
+                if (!nested.TryGetValue(t.Name, out var list))
+                    nested[t.Name] = list = new List<TypeModel>();
+                list.Add(t);
+            }
+        }
+        if (nested.Count == 0)
+            return;
+        foreach (TypeModel t in module.Types)
+        {
+            if (t.External)
+                continue;
+            var scopes = new List<TypeModel>();
+            void AddScope(TypeModel? s)
+            {
+                if (s == null || scopes.Contains(s))
+                    return;
+                scopes.Add(s);
+                foreach (string b in s.Bases)
+                    AddScope(byName.TryGetValue(StripHelix(b), out TypeModel? bt) ? bt : byName.GetValueOrDefault(StripHelix(b).Split("::")[^1]));
+                AddScope(s.Outer);
+            }
+            AddScope(t);
+            void Qualify(TypeRef r)
+            {
+                foreach (TypeRef a in r.Arguments)
+                    Qualify(a);
+                if (r.Name.Contains("::") || !nested.TryGetValue(r.Name, out var candidates))
+                    return;
+                foreach (TypeModel s in scopes)
+                    foreach (TypeModel c in candidates)
+                        if (c.Outer == s)
+                        {
+                            r.Name = s.Name + "::" + r.Name;
+                            return;
+                        }
+            }
+            foreach (FieldModel f in t.Fields)
+                Qualify(f.Type);
+            foreach (MethodModel m in t.Methods.Concat(t.Untagged).Concat(t.Properties.SelectMany(p => p.Setter != null ? new[] { p.Getter, p.Setter } : new[] { p.Getter })))
+            {
+                Qualify(m.Return);
+                foreach (ParameterModel p in m.Parameters)
+                    Qualify(p.Type);
+            }
+            foreach (EventModel e in t.Events)
+                foreach (TypeRef a in e.Arguments)
+                    Qualify(a);
         }
     }
 

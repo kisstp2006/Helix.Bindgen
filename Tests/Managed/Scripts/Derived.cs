@@ -23,6 +23,14 @@ namespace Scripts
 
         public override string Greeting(string to) => "yo " + to;
 
+        public int repairs;
+
+        protected override void OnRepaired(int amount)
+        {
+            repairs += amount;
+            base.OnRepaired(amount);
+        }
+
         public override void Damage(int amount)
         {
             log += "D" + amount;

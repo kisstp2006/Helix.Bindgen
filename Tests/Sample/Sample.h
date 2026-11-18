@@ -171,6 +171,9 @@ namespace helix::sample
         HX_PROPERTY() i32 rank() const override { return 4; }
         HX_FUNCTION() virtual void OnHit(i32 damage) { health -= damage; }
         HX_FUNCTION() void TakeHit(i32 damage) { OnHit(damage); }
+        // Protected in C#: only classes deriving from it see and override it.
+        HX_FUNCTION(Protected) virtual void OnRepaired(i32 amount) { health += amount; }
+        HX_FUNCTION() void Repair(i32 amount) { OnRepaired(amount); }
         // Interfaces from C#: a native object that implements one, or a C# object.
         HX_FUNCTION() static void Hurt(IDamageable& target, i32 amount) { target.Damage(amount); }
         HX_FUNCTION() static bool HurtIfAny(IDamageable* target, i32 amount);

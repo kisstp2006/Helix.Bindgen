@@ -104,7 +104,12 @@ private:
   script base class is a handle of the nearest handle above it); a class tagged `ScriptBase` becomes the C++ class scripts derive from, with the members
   of its chain (and the API's names for the classes of that chain). Events take a `Callback` and answer a token for
   `Remove`. A failed call is logged and answers the default. A member tagged `Internal` is internal in C# (for C#
-  written by hand next to it) and still in the C++ API.
+  written by hand next to it) and still in the C++ API. A member tagged `Protected` (or `ProtectedInternal`) is protected in C#: C#
+  classes deriving from the class override it with the same access, and the native dispatch reaches it through an
+  internal forwarder of the class.
+  A nested type is named by its class in C# and the API (two `Direction` enums of two classes stay apart); types are
+  found by their qualified C++ name, so two modules' classes of one name do not meet. A property whose name is a C++
+  keyword (`template`) takes a trailing underscore in the API.
 - Handle classes: a class of a game module deriving from another module's API handle by the API's name
   (`class Gauge : public ::HelixEngine::UI::Element`) is not bound: it is registered as a `NativeHandleClass` with
   every tag of the class, a constructor that adopts the object's id, and its tagged fields and properties (set
@@ -114,7 +119,8 @@ private:
   script class: its message methods (public or not, no virtual needed), its methods without arguments or with one
   bool, and its methods without arguments that answer a pointer (the pointee's name goes with them: the engine takes
   a pipeline asset's `RenderPipeline* CreatePipeline()` so) are registered as a `NativeScriptClass` with function
-  pointers and the name of its script base; the tag argument `Order = <n>` is its DefaultExecutionOrder. Its base
+  pointers and the name of its script base; the tag argument `Order = <n>` is its DefaultExecutionOrder, `RequireComponent = "engine::RectTransform, ..."` the component types
+  adding it adds first (its bases' too). Its base
   is the nearest script class (of this module or another one) or script base. A script class with tagged virtual
   functions also carries its generated C++ subclass, which the engine makes the objects of C# script classes below
   it as; a class the compiler finds abstract has no construct function (only the C# classes below it are made), and

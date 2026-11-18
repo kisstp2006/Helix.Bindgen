@@ -226,9 +226,10 @@ public sealed class Binding
     /// <summary>A class of the module deriving from a script base class (HX_CLASS(ScriptBase)), made by its engine.</summary>
     public bool IsScriptClass(TypeModel t) => !t.External && IsScriptClassOfAnyModule(t);
 
-    /// <summary>A script class of this module or of another one (a base the engine registered as a class).</summary>
+    /// <summary>A script class of this module or of another one (a base the engine registered as a class); an abstract one
+    /// (tagged or found so) has no construct function.</summary>
     public bool IsScriptClassOfAnyModule(TypeModel t) =>
-        t.Kind == TypeKind.Class && IsObjectClass(t) && !t.Tag.Has("ScriptBase") && !t.Tag.Has("Abstract") &&
+        t.Kind == TypeKind.Class && IsObjectClass(t) && !t.Tag.Has("ScriptBase") &&
         BaseChain(t).Skip(1).Any(b => b.Tag.Has("ScriptBase"));
 
     /// <summary>The methods of a script class an engine may call: no arguments or one bool, returning nothing, of the
@@ -289,8 +290,14 @@ public sealed class Binding
             }
         }
         foreach (TypeModel i in Module.Types.Where(t => !t.External && t.Kind == TypeKind.Interface))
+        {
             foreach (MethodModel m in i.Methods.Where(m => !m.Static && !m.Tag.Has("Hidden")))
                 Managed.Add(new ManagedEntry { Kind = ExportKind.Interface, Method = m, Owner = i, Name = $"HxInterface_{i.Ident}_{m.Name}" });
+            // The interface's properties: their getters read the C# object's property.
+            foreach (PropertyModel p in i.Properties.Where(p => !p.Static && !p.Getter.Tag.Has("Hidden") && !i.Methods.Contains(p.Getter)))
+                Managed.Add(new ManagedEntry { Kind = ExportKind.Interface, Method = p.Getter, Property = p, Owner = i,
+                                               Name = $"HxInterface_{i.Ident}_{p.Getter.Name}" });
+        }
         var used = new Dictionary<string, int>();
         for (int k = 0; k < Managed.Count; k++)
         {

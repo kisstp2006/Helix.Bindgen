@@ -311,6 +311,10 @@ namespace Helix.Bindgen.Tests
             Check(Thing.TotalWeight() == 21, "C++ calls the C# override, which calls the C++ base");
             Check(Thing.GreetAll("ann") == "yo ann;", "an override with a string argument and result");
             Check(r.Weight() == 21 && r.Greeting("bo") == "yo bo", "C# calls of the overrides");
+            r.Repair(3);
+            Check(r.repairs == 3 && r.health == 98, "a protected override reached from C++, its base call the C++ implementation");
+            Check(typeof(Mover).GetMethod("OnRepaired", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)?.IsFamily == true,
+                  "a member tagged Protected is protected in C#");
             Sample.Badge.Register();
             Check(r.badge != null && r.BadgeNumber(r.badge.id) == 9 && r.BadgeNumber(0) == -1, "a field of a class bound by hand is its C# object");
             Check(Thing.TotalRank() == 104 && r.rank == 104, "C++ reads a C# override of a virtual property, which reads the C++ base");
@@ -318,7 +322,7 @@ namespace Helix.Bindgen.Tests
             Check(Thing.TotalWeight() == 31 && plain.Weight() == 10 && plain.Greeting("x") == "hi x", "without overrides C++ calls stay in C++");
             Check(Thing.TotalRank() == 108 && plain.rank == 4, "without an override a virtual property stays in C++");
             Mover.Hurt(r, 3);
-            Check(r.log == "D3" && r.health == 92, "C++ calls an interface function of the C# object, its base reaches C++");
+            Check(r.log == "D3" && r.health == 95, "C++ calls an interface function of the C# object, its base reaches C++");
 
             Throws<InvalidOperationException>(() => new Shape("abstract"), "a class abstract in C++ is not made itself");
             var circle = new Scripts.Circle("circle", 2);

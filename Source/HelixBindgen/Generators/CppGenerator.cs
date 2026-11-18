@@ -392,6 +392,15 @@ public sealed class CppGenerator
             _c.Line($"c.executionOrder = {(int.TryParse(t.Tag.Get("Order"), out int order) ? order : 0)};");
             if (_transfers.Contains(t))
                 _c.Line($"c.transfer = &HxTransfer_{t.Ident};");
+            // RequireComponent of the class and its bases (C++ names, comma separated).
+            var required = _b.BaseChain(t).SelectMany(b => (b.Tag.Get("RequireComponent") ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                               .Distinct().ToList();
+            if (required.Count > 0)
+            {
+                string Spelled(string n) => n.StartsWith("::", StringComparison.Ordinal) ? n : "::helix::" + n;
+                _c.Line($"static const TypeId hxRequired[] = {{{string.Join(", ", required.Select(n => $"TypeOf<{Spelled(n)}>()"))}}};");
+                _c.Line($"c.required = Span<const TypeId>(hxRequired, {required.Count}u);");
+            }
             if (_b.Overridables.ContainsKey(t))
             {
                 // Objects of C# script classes deriving from it: every virtual call goes to the C# object, which calls
@@ -681,6 +690,10 @@ public sealed class CppGenerator
             _c.Line($"return {value};");
     }
 
+    // The value a call that failed answers: null for an object pointer, else the type's default.
+    string DefaultReturn(MethodModel m) =>
+        m.Return.Pointers > 0 ? "return nullptr;" : $"return HxDefault<{Spell(m.Return.Bare(), m.Where, m.Name)}>();";
+
     string Signature(MethodModel m, string name) =>
         $"{Spell(m.Return, m.Where, m.Name)} {name}({string.Join(", ", m.Parameters.Select((p, i) => $"{Spell(p.Type, m.Where, p.Name)} a{i}"))}){(m.Const ? " const" : "")}";
 
@@ -730,23 +743,24 @@ public sealed class CppGenerator
         {
             string q = Q(i);
             _c.Line($"// {i.Name} implemented by a C# object: its calls go to the C# object of the handle.");
-            _c.Open($"class HxAdapter_{i.Ident} final : public {q}");
+            // Not final: an interface whose bases' methods are not bound leaves it abstract (never made then).
+            _c.Open($"class HxAdapter_{i.Ident} : public {q}");
             _c.Line("public:", -1);
             _c.Line($"explicit HxAdapter_{i.Ident}(u64 handle) : handle_(handle) {{}}");
             foreach (ManagedEntry e in _b.Managed.Where(e => e.Kind == ExportKind.Interface && e.Owner == i))
             {
                 MethodModel m = e.Method!;
                 _c.Open(Signature(m, m.Name) + " override");
-                ManagedCall(m, "handle_", e.Index, $"{i.Name}.{m.CsName}", $"return HxDefault<{Spell(m.Return.Bare(), m.Where, m.Name)}>();");
+                ManagedCall(m, "handle_", e.Index, $"{i.Name}.{m.CsName}", DefaultReturn(m));
                 _c.Close();
             }
             _c.Line();
             _c.Line("private:", -1);
-            _c.Line("u64 handle_;");
+            _c.Line("[[maybe_unused]] u64 handle_;");
             _c.Close("};");
             _c.Line();
             _c.Line($"// A native object as {i.Name}: through the class that implements it.");
-            _c.Open($"{q}* HxCastTo_{i.Ident}(u64 id, u32 type)");
+            _c.Open($"[[maybe_unused]] {q}* HxCastTo_{i.Ident}(u64 id, u32 type)");
             foreach (TypeModel c in _b.ImplementersOf(i))
             {
                 _c.Line($"if (IsAssignableFrom(TypeOf<{Q(c)}>(), TypeId{{type}}))");
@@ -758,7 +772,7 @@ public sealed class CppGenerator
             _c.Close();
             _c.Line();
             _c.Line($"// A Variant of an object (held by its root's address) as {i.Name}.");
-            _c.Open($"{q}* HxInterfaceOf_{i.Ident}(const Variant& value)");
+            _c.Open($"[[maybe_unused]] {q}* HxInterfaceOf_{i.Ident}(const Variant& value)");
             TypeModel? root = _b.ImplementersOf(i).Select(c => _b.RootOf(c)).FirstOrDefault();
             if (root != null)
             {
@@ -786,7 +800,9 @@ public sealed class CppGenerator
             {
                 MethodModel m = o.Nearest;
                 string ret = Spell(m.Return, m.Where, m.Name);
-                string baseCall = o.Pure ? $"return HxDefault<{Spell(m.Return.Bare(), m.Where, m.Name)}>();" : $"return {Q(o.NearestOwner)}::{m.Name}({ArgList(m)});";
+                // The base: the class's own implementation, by C++'s lookup from the class (an override it or a class
+                // between has, tagged or not), not the nearest tagged declaration's.
+                string baseCall = o.Pure ? DefaultReturn(m) : $"return {q}::{m.Name}({ArgList(m)});";
                 _c.Line();
                 _c.Open(Signature(m, m.Name) + " override");
                 // Before its C# object is attached (a script object being made) the C++ implementation runs.
@@ -798,6 +814,8 @@ public sealed class CppGenerator
                 _c.Open(Signature(m, "HxBase_" + m.Name));
                 if (o.Pure)
                 {
+                    for (int k = 0; k < m.Parameters.Count; k++)
+                        _c.Line($"(void)a{k};");
                     _c.Line($"ReportBindingFailure(\"{t.Name}.{m.CsName}: abstract in C++\", InteropMissingObject);");
                     _c.Line(baseCall);
                 }
@@ -1561,7 +1579,8 @@ public sealed class CppGenerator
         else
             lines.Add($"result = {ToVariantExpr(r, call, mm.Return)};");
         lines.Add("return true;");
-        bool usesError = !isStatic || mm.Parameters.Count > 0;
+        // Named only where a line sets it (interface arguments convert without failing).
+        bool usesError = lines.Any(l => l.Contains("error = ", StringComparison.Ordinal));
         string sig = $"[](const void*, {(isStatic ? "void*" : "void* instance")}, {(mm.Parameters.Count > 0 ? "Span<const Variant> args" : "Span<const Variant>")}, " +
                      $"{(r.Kind == MapKind.Void ? "Variant&" : "Variant& result")}, {(usesError ? "String& error" : "String&")}) -> bool";
         return sig + " { " + string.Join(" ", lines) + " }";
